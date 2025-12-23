@@ -11,7 +11,7 @@ From repository:
 2. Create and activate a new environment with conda (with `Python 3.10` or newer).
 
 ```shell
-conda env create -n fdiff python=3.10
+conda create -n fdiff python=3.10
 conda activate fdiff
 ```
 3. Install the requirement.
@@ -20,9 +20,30 @@ pip install freqdiff
 ```
 
 4. If you intend to train models, make sure that wandb is correctly configured on your machine by following [this guide](https://docs.wandb.ai/quickstart). 
-5. Some of the datasets are automatically downloaded by our scripts via kaggle API. Make sure to create a kaggle token as explained [here](https://towardsdatascience.com/downloading-datasets-from-kaggle-for-your-ml-project-b9120d405ea4).
+5. Download datasets (required for training):
+   
+   First, get your Kaggle API token from [Kaggle Settings](https://www.kaggle.com/settings) and configure it:
+   
+   ```shell
+   mkdir -p ~/.kaggle
+   mv ~/Downloads/kaggle.json ~/.kaggle/kaggle.json
+   chmod 600 ~/.kaggle/kaggle.json
+   ```
+   
+   Then download the ECG dataset (default dataset for training):
+   
+   ```shell
+   kaggle datasets download -d shayanfazeli/heartbeat
+   unzip heartbeat.zip
+   mkdir -p data/ecg
+   mv mitbih_train.csv data/ecg/
+   mv mitbih_test.csv data/ecg/
+   rm heartbeat.zip
+   ```
+   
+   Note: Other datasets (NASDAQ, NASA, etc.) will be automatically downloaded when you run training if Kaggle API is configured.
 
-When the packages are installed, you are ready to train diffusion models!
+When the packages are installed and datasets are downloaded, you are ready to train diffusion models!
 
 # 2. Use
 
