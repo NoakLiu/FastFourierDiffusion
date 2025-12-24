@@ -5,7 +5,9 @@ from tqdm import tqdm
 
 from fdiff.models.score_models import ScoreModule
 from fdiff.schedulers.sde import SDE
+from fdiff.utils.caching import E2CRFCache
 from fdiff.utils.dataclasses import DiffusableBatch
+from fdiff.utils.fourier import dft, idft
 
 
 class DiffusionSampler:
@@ -13,6 +15,8 @@ class DiffusionSampler:
         self,
         score_model: ScoreModule,
         sample_batch_size: int,
+        use_cache: bool = False,
+        cache_kwargs: Optional[dict] = None,
     ) -> None:
         self.score_model = score_model
         self.noise_scheduler = score_model.noise_scheduler
@@ -20,8 +24,19 @@ class DiffusionSampler:
         self.sample_batch_size = sample_batch_size
         self.n_channels = score_model.n_channels
         self.max_len = score_model.max_len
+        
+        # Caching support
+        self.use_cache = use_cache
+        if use_cache:
+            cache_kwargs = cache_kwargs or {}
+            self.score_model.enable_caching(**cache_kwargs)
 
-    def reverse_diffusion_step(self, batch: DiffusableBatch) -> torch.Tensor:
+    def reverse_diffusion_step(
+        self, 
+        batch: DiffusableBatch,
+        step: int = 0,
+        recompute_tokens: Optional[set[int]] = None,
+    ) -> torch.Tensor:
         # Get X and timesteps
         X = batch.X
         timesteps = batch.timesteps
@@ -30,8 +45,21 @@ class DiffusionSampler:
         assert timesteps is not None and timesteps.size(0) == len(batch)
         assert torch.min(timesteps) == torch.max(timesteps)
 
-        # Predict score for the current batch
-        score = self.score_model(batch)
+        # Predict score for the current batch with caching support
+        if self.use_cache and recompute_tokens is not None:
+            score, crf = self.score_model(
+                batch, 
+                recompute_tokens=recompute_tokens,
+                step=step,
+                return_crf=True
+            )
+            # Update cache with CRF
+            if self.score_model.cache is not None:
+                self.score_model.cache.update_crf(crf)
+                self.score_model.cache.current_step = step
+        else:
+            score = self.score_model(batch)
+        
         # Apply a step of reverse diffusion
         output = self.noise_scheduler.step(
             model_output=score, timestep=timesteps[0].item(), sample=X
@@ -78,30 +106,59 @@ class DiffusionSampler:
                 )
                 # Sample from noise distribution
                 X = self.sample_prior(batch_size)
+                
+                # Reset cache for new batch
+                if self.use_cache and self.score_model.cache is not None:
+                    self.score_model.cache.reset()
 
                 # Perform the diffusion step by step
-                for t in tqdm(
-                    self.noise_scheduler.timesteps,
+                timestep_list = list(self.noise_scheduler.timesteps)
+                for step_idx, t in enumerate(tqdm(
+                    timestep_list,
                     desc="Diffusion",
                     unit="step",
                     leave=False,
                     colour="green",
-                ):
+                )):
                     # Define timesteps for the batch
+                    t_val = t.item() if hasattr(t, 'item') else float(t)
                     timesteps = torch.full(
                         (batch_size,),
-                        t,
-                        dtype=(
-                            torch.long if isinstance(t.item(), int) else torch.float32
-                        ),
+                        t_val,
+                        dtype=torch.long if isinstance(t_val, int) else torch.float32,
                         device=self.score_model.device,
                         requires_grad=False,
                     )
                     # Create diffusable batch
                     batch = DiffusableBatch(X=X, y=None, timesteps=timesteps)
+                    
+                    # Determine which tokens to recompute (for caching)
+                    recompute_tokens = None
+                    if self.use_cache and self.score_model.cache is not None:
+                        cache = self.score_model.cache
+                        
+                        # Convert to frequency domain for event intensity computation
+                        X_tilde = dft(X)
+                        
+                        # Compute event intensity if we have previous CRF
+                        if cache.crf_cache is not None:
+                            event_intensity = cache.compute_event_intensity(
+                                cache.crf_cache, step_idx
+                            )
+                        else:
+                            event_intensity = 1.0  # High intensity on first step
+                        
+                        # Determine recompute set
+                        recompute_tokens = cache.determine_recompute_set(
+                            X_tilde, event_intensity, step_idx
+                        )
+                    
                     # Return denoised X
-
-                    X = self.reverse_diffusion_step(batch)
+                    X = self.reverse_diffusion_step(
+                        batch, 
+                        step=step_idx,
+                        recompute_tokens=recompute_tokens
+                    )
 
                 # Add the samples to the list
                 all_samples.append(X.cpu())

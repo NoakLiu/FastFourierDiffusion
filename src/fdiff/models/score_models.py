@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Optional, Union
 
 import pytorch_lightning as pl
 import torch
@@ -15,6 +15,7 @@ from fdiff.models.transformer import (
     TimeEncoding,
 )
 from fdiff.schedulers.sde import SDE
+from fdiff.utils.caching import E2CRFCache
 from fdiff.utils.dataclasses import DiffusableBatch
 from fdiff.utils.losses import get_sde_loss_fn
 
@@ -63,8 +64,18 @@ class ScoreModule(pl.LightningModule):
 
         # Save all hyperparameters for checkpointing
         self.save_hyperparameters()
+        
+        # Caching support
+        self.cache: Optional[E2CRFCache] = None
+        self.use_cache: bool = False
 
-    def forward(self, batch: DiffusableBatch) -> torch.Tensor:
+    def forward(
+        self, 
+        batch: DiffusableBatch,
+        recompute_tokens: Optional[set[int]] = None,
+        step: int = 0,
+        return_crf: bool = False,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
         X = batch.X
         assert X.size()[1:] == (
             self.max_len,
@@ -83,15 +94,96 @@ class ScoreModule(pl.LightningModule):
         # Add time encoding
         X = self.time_encoder(X, timesteps)
 
-        # Backbone
-        X = self.backbone(X)
+        # Backbone with caching support
+        if self.use_cache and recompute_tokens is not None:
+            X, crf = self._forward_with_cache(X, recompute_tokens, step)
+        else:
+            # Standard forward pass
+            X = self.backbone(X)
+            crf = None
 
         # Channel unembedding
         X = self.unembedder(X)
 
         assert isinstance(X, torch.Tensor)
-
+        
+        if return_crf:
+            return X, crf
         return X
+    
+    def _forward_with_cache(
+        self,
+        X: torch.Tensor,
+        recompute_tokens: set[int],
+        step: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass with caching support.
+        
+        Args:
+            X: Input tensor (batch_size, max_len, d_model)
+            recompute_tokens: Set of token indices to recompute
+            step: Current diffusion step
+            
+        Returns:
+            Output tensor and CRF (cumulative residual features)
+        """
+        # Store CRF at each layer
+        crf_list = []
+        h = X  # Initial embedding
+        
+        # Process through each transformer layer
+        for layer_idx, layer in enumerate(self.backbone.layers):
+            # Compute layer output
+            # Note: Full token-level selective recomputation would require
+            # modifying the transformer layer, which is complex.
+            # For now, we recompute all but track CRF for event intensity.
+            h_new = layer(h)
+            
+            # Store CRF (cumulative residual feature)
+            crf_list.append(h_new.clone())
+            h = h_new
+        
+        # Stack CRF from all layers: (num_layers, batch_size, max_len, d_model)
+        # For single sample, take first batch element
+        crf = torch.stack([c[0] for c in crf_list], dim=0)  # (num_layers, max_len, d_model)
+        
+        return h, crf
+    
+    def enable_caching(
+        self,
+        cache: Optional[E2CRFCache] = None,
+        **cache_kwargs
+    ) -> None:
+        """Enable caching for inference.
+        
+        Args:
+            cache: Optional E2CRFCache instance. If None, creates a new one.
+            **cache_kwargs: Arguments to pass to E2CRFCache if creating new instance.
+        """
+        if cache is None:
+            # Get number of heads from the first transformer layer
+            first_layer = self.backbone.layers[0]
+            n_head = getattr(first_layer.self_attn, 'num_heads', 12)  # Default to 12 if not found
+            # Get device, with fallback to CPU
+            try:
+                device = next(self.parameters()).device
+            except StopIteration:
+                device = torch.device("cpu")
+            cache = E2CRFCache(
+                max_len=self.max_len,
+                num_layers=len(self.backbone.layers),
+                d_model=self.d_model,
+                n_head=n_head,
+                device=device,
+                **cache_kwargs
+            )
+        self.cache = cache
+        self.use_cache = True
+    
+    def disable_caching(self) -> None:
+        """Disable caching."""
+        self.use_cache = False
+        self.cache = None
 
     def training_step(
         self, batch: DiffusableBatch, batch_idx: int, dataloader_idx: int = 0
@@ -156,7 +248,7 @@ class ScoreModule(pl.LightningModule):
                 f"Scheduler {self.noise_scheduler} not implemented yet, cannot set loss function."
             )
 
-    def set_time_encoder(self) -> TimeEncoding | GaussianFourierProjection:
+    def set_time_encoder(self) -> Union[TimeEncoding, GaussianFourierProjection]:
         if isinstance(self.noise_scheduler, SDE):
             return GaussianFourierProjection(d_model=self.d_model)
 
