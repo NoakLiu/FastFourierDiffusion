@@ -2,7 +2,7 @@
 
 This repository implements time series diffusion in the frequency domain with E2-CRF (Error-Feedback Event-Driven Caching) acceleration.
  
-# 1. Install
+## 1. Install
 
 From repository:
 1. Clone the repository.
@@ -43,9 +43,9 @@ pip install freqdiff
 
 When the packages are installed and datasets are downloaded, you are ready to train diffusion models!
 
-# 2. Use
+## 2. Use
 
-## 2.1 Train
+### 2.1 Train
 In order to train models, you can simply run the following command:
 
 ```shell
@@ -73,7 +73,7 @@ At the end of training, your model is stored in the `lightning_logs` directory, 
 
 **Example:** After training, you might see a folder like `lightning_logs/03wb0ssr/`. In this case, `03wb0ssr` is your `model_id`.
 
-## 2.2 Sample
+### 2.2 Sample
 
 In order to sample from a trained model, you can simply run the following command:
 
@@ -85,7 +85,7 @@ where `XYZ` is the `run_id` of the model you want to sample from. At the end of 
 
 One can then reproduce the plots in the paper by including the  `run_id` to the `run_list` list appearing in [this notebook](notebooks/results.ipynb) and running all cells.
 
-## 2.3 E2-CRF Caching Acceleration
+### 2.3 E2-CRF Caching Acceleration
 
 This repository includes E2-CRF (Error-Feedback Event-Driven Cumulative Residual Feature) caching for accelerating frequency domain diffusion models. E2-CRF achieves 2-4× speedup while maintaining sample quality through:
 
@@ -94,7 +94,7 @@ This repository includes E2-CRF (Error-Feedback Event-Driven Cumulative Residual
 3. **Error-Feedback Correction**: Preventing quality degradation through closed-loop error correction
 4. **Energy-Weighted Thresholds**: Using spectral energy to determine caching strategy
 
-### Basic Usage with Caching
+#### Basic Usage with Caching
 
 To enable caching during sampling, you can modify the sampling code:
 
@@ -118,7 +118,7 @@ sampler = DiffusionSampler(
 samples = sampler.sample(num_samples=10, num_diffusion_steps=100)
 ```
 
-### Custom Cache Configuration
+#### Custom Cache Configuration
 
 You can customize cache parameters for different speed/quality trade-offs:
 
@@ -137,7 +137,7 @@ sampler = DiffusionSampler(
 )
 ```
 
-### Cache Parameters
+#### Cache Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -152,7 +152,7 @@ sampler = DiffusionSampler(
 - **For quality preservation**: Decrease K, increase tau_0, decrease R
 - **For balanced performance**: Use default values
 
-### How to Get Model ID
+#### How to Get Model ID
 
 The `model_id` is the `run_id` generated during training. You can find it in several ways:
 
@@ -171,7 +171,7 @@ The `model_id` is the `run_id` generated during training. You can find it in sev
 
 4. **Check wandb dashboard:** If wandb is configured, the run_id is also available in the [wandb dashboard](https://wandb.ai/).
 
-### Benchmarking
+### 2.4 Benchmarking
 
 #### Speedup Benchmark
 
@@ -212,13 +212,13 @@ This compares:
 5. Without energy-weighted threshold
 6. Naive caching
 
-### Expected Performance
+### 2.5 E2-CRF Expected Performance
 
 - **Speedup**: 2-4× on real-world datasets
 - **Quality**: Maintained (measured by sliced Wasserstein distance)
 - **Memory**: O(1) overhead per diffusion step
 
-# 3. Contribute
+<!-- # 3. Contribute
 
 If you wish to contribute, please make sure that your code is compliant with our tests and coding conventions. To do so, you should install the required testing packages with:
 
@@ -236,9 +236,9 @@ Before any commit, please make sure that your staged code is compliant with our 
 
 ```shell
 pre-commit
-```
+``` -->
 
-# 4. Citation
+# 3. Citation
 
 If you use the E2-CRF caching implementation, please cite:
 
