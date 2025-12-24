@@ -52,7 +52,14 @@ In order to train models, you can simply run the following command:
 python cmd/train.py 
 ```
 
-By default, this command will train a score model in the time domain with the `ecg` dataset. In order to modify this behaviour, you can use [hydra override syntax](https://hydra.cc/docs/advanced/override_grammar/basic/). The following hyperparameters can be modified to retrain all the models appearing in the paper:
+By default, this command will train a score model in the time domain with the `ecg` dataset for 200 epochs. To reduce the number of epochs, you can use:
+
+```shell
+# example for training with 10 epochs (quick test)
+python cmd/train.py trainer.max_epochs=10
+```
+
+In order to modify other hyperparameters, you can use [hydra override syntax](https://hydra.cc/docs/advanced/override_grammar/basic/). The following hyperparameters can be modified to retrain all the models appearing in the paper:
 
 | Hyperparameter | Description | Values |
 |----------------|-------------|---------------|
@@ -63,6 +70,8 @@ By default, this command will train a score model in the time domain with the `e
 | score_model | The backbone to use for the score model. | default, lstm |
 
 At the end of training, your model is stored in the `lightning_logs` directory, in a folder named after the current `run_id`. You can find the `run_id` in the logs of the training and in the [wandb dashboard](https://wandb.ai/) if you have correctly configured wandb.
+
+**Example:** After training, you might see a folder like `lightning_logs/03wb0ssr/`. In this case, `03wb0ssr` is your `model_id`.
 
 ## 2.2 Sample
 
@@ -143,6 +152,25 @@ sampler = DiffusionSampler(
 - **For quality preservation**: Decrease K, increase tau_0, decrease R
 - **For balanced performance**: Use default values
 
+### How to Get Model ID
+
+The `model_id` is the `run_id` generated during training. You can find it in several ways:
+
+1. **List all available models:**
+   ```shell
+   ls lightning_logs/
+   ```
+   Each folder name (e.g., `03wb0ssr`, `c3kntdck`) is a model_id.
+
+2. **Check training logs:** The `run_id` is printed during training and saved in the `lightning_logs` directory.
+
+3. **Use `latest`:** Automatically use the most recent checkpoint:
+   ```shell
+   python cmd/benchmark_cache.py model_id=latest
+   ```
+
+4. **Check wandb dashboard:** If wandb is configured, the run_id is also available in the [wandb dashboard](https://wandb.ai/).
+
 ### Benchmarking
 
 #### Speedup Benchmark
@@ -150,7 +178,11 @@ sampler = DiffusionSampler(
 Run the speedup benchmark to compare cached vs. non-cached inference:
 
 ```shell
-python cmd/benchmark_cache.py model_id=XYZ num_samples=10 num_diffusion_steps=100
+# Use latest model (recommended for quick test)
+python cmd/benchmark_cache.py model_id=latest num_samples=10 num_diffusion_steps=100
+
+# Or specify a specific model_id
+python cmd/benchmark_cache.py model_id=03wb0ssr num_samples=10 num_diffusion_steps=100
 ```
 
 This will output:
@@ -165,7 +197,11 @@ This will output:
 Run the ablation study to understand the contribution of each component:
 
 ```shell
-python cmd/ablation_cache.py model_id=XYZ num_samples=20 num_diffusion_steps=100
+# Use latest model
+python cmd/ablation_cache.py model_id=latest num_samples=20 num_diffusion_steps=100
+
+# Or specify a specific model_id
+python cmd/ablation_cache.py model_id=03wb0ssr num_samples=20 num_diffusion_steps=100
 ```
 
 This compares:

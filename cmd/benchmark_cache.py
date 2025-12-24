@@ -77,16 +77,20 @@ def main(cfg: DictConfig) -> None:
     """
     # Load model
     model_id = cfg.get("model_id", "latest")
+    log_dir = Path("lightning_logs")
+    
     if model_id == "latest":
         # Find latest checkpoint
-        log_dir = Path("lightning_logs")
         checkpoints = list(log_dir.glob("*/checkpoints/*.ckpt"))
         if not checkpoints:
             raise ValueError("No checkpoints found")
         checkpoint_path = max(checkpoints, key=lambda p: p.stat().st_mtime)
     else:
         checkpoint_path = log_dir / model_id / "checkpoints" / "*.ckpt"
-        checkpoint_path = list(checkpoint_path.parent.glob(checkpoint_path.name))[0]
+        checkpoint_files = list(checkpoint_path.parent.glob(checkpoint_path.name))
+        if not checkpoint_files:
+            raise ValueError(f"No checkpoint found for model_id: {model_id}")
+        checkpoint_path = checkpoint_files[0]
     
     # Load model from checkpoint
     score_model = ScoreModule.load_from_checkpoint(str(checkpoint_path))
