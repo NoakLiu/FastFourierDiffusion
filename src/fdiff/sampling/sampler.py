@@ -136,22 +136,41 @@ class DiffusionSampler:
                     recompute_tokens = None
                     if self.use_cache and self.score_model.cache is not None:
                         cache = self.score_model.cache
-                        
-                        # Convert to frequency domain for event intensity computation
-                        X_tilde = dft(X)
+                        cache.current_step = step_idx
                         
                         # Compute event intensity if we have previous CRF
+                        # Use a lightweight approximation: compute energy in time domain
                         if cache.crf_cache is not None:
-                            event_intensity = cache.compute_event_intensity(
-                                cache.crf_cache, step_idx
-                            )
+                            # Use time domain energy as a proxy for frequency domain changes
+                            # This avoids expensive DFT computation every step
+                            X_energy = torch.norm(X, dim=-1).pow(2)  # (batch_size, max_len)
+                            
+                            # Simple heuristic: if energy changed significantly, recompute more
+                            if hasattr(cache, '_prev_energy') and cache._prev_energy is not None:
+                                energy_change = torch.norm(X_energy - cache._prev_energy).item()
+                                energy_norm = torch.norm(cache._prev_energy).item() + cache.eta
+                                event_intensity = (energy_change / energy_norm) if energy_norm > 0 else 1.0
+                            else:
+                                event_intensity = 1.0
+                            cache._prev_energy = X_energy.clone()
                         else:
                             event_intensity = 1.0  # High intensity on first step
+                            cache._prev_energy = torch.norm(X, dim=-1).pow(2).clone()
                         
-                        # Determine recompute set
-                        recompute_tokens = cache.determine_recompute_set(
-                            X_tilde, event_intensity, step_idx
-                        )
+                        # Determine recompute set based on event intensity
+                        # For simplicity, use a fixed strategy based on event intensity
+                        if event_intensity > cache.tau_warn:
+                            # High intensity: recompute all
+                            recompute_tokens = set(range(self.max_len))
+                        else:
+                            # Low intensity: only recompute low-frequency tokens + some high-freq
+                            recompute_tokens = set(range(cache.K))
+                            # Add some high-frequency tokens randomly
+                            high_freq = list(range(cache.K, self.max_len))
+                            num_probe = max(1, int(len(high_freq) * cache.random_probe_ratio))
+                            if num_probe > 0 and len(high_freq) > 0:
+                                probe_indices = torch.randperm(len(high_freq), device=X.device)[:num_probe]
+                                recompute_tokens.update([high_freq[i] for i in probe_indices.cpu().tolist()])
                     
                     # Return denoised X
                     X = self.reverse_diffusion_step(

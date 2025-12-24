@@ -93,6 +93,9 @@ class E2CRFCache:
             "cache_hit_count": 0,
             "total_tokens": 0,
         }
+        
+        # Track previous energy for lightweight event intensity computation
+        self._prev_energy: Optional[torch.Tensor] = None
     
     def reset(self) -> None:
         """Reset cache for new sampling sequence."""
@@ -106,6 +109,7 @@ class E2CRFCache:
             "cache_hit_count": 0,
             "total_tokens": 0,
         }
+        self._prev_energy = None
     
     def compute_event_intensity(
         self, 

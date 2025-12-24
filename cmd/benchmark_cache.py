@@ -16,6 +16,10 @@ from fdiff.models.score_models import ScoreModule
 from fdiff.sampling.sampler import DiffusionSampler
 from fdiff.utils.caching import E2CRFCache
 
+# Fix for PyTorch 2.6+ weights_only loading
+from fdiff.schedulers.sde import VPScheduler, VEScheduler
+torch.serialization.add_safe_globals([VPScheduler, VEScheduler])
+
 
 def benchmark_sampling(
     score_model: ScoreModule,
@@ -93,7 +97,11 @@ def main(cfg: DictConfig) -> None:
         checkpoint_path = checkpoint_files[0]
     
     # Load model from checkpoint
-    score_model = ScoreModule.load_from_checkpoint(str(checkpoint_path))
+    # Use weights_only=False for PyTorch 2.6+ compatibility
+    score_model = ScoreModule.load_from_checkpoint(
+        str(checkpoint_path),
+        weights_only=False
+    )
     score_model.eval()
     if torch.cuda.is_available():
         score_model = score_model.cuda()
