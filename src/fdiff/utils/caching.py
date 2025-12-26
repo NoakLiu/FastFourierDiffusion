@@ -2,12 +2,17 @@
 
 This module implements the E2-CRF caching mechanism for accelerating frequency domain
 diffusion models as described in the paper.
+
+Enhanced with FreqCa (Frequency-aware Caching) based on:
+"FREQCA: ACCELERATING DIFFUSION MODELS VIA FREQUENCY-AWARE CACHING"
 """
 
-from typing import Optional
+from typing import Optional, Literal
 
 import torch
 import torch.nn as nn
+
+from fdiff.utils.fourier import frequency_decompose_fft, frequency_decompose_dct, predict_hermite
 
 
 class E2CRFCache:
@@ -34,6 +39,15 @@ class E2CRFCache:
         tau_warn: float = 0.5,  # Warning threshold for event intensity
         random_probe_ratio: float = 0.05,  # Ratio of high-freq tokens to probe
         alpha_base: float = 0.1,  # Base error-feedback correction strength
+        # FreqCa parameters
+        use_freqca: bool = True,  # Enable frequency-aware caching
+        freq_decomp: Literal["fft", "dct"] = "dct",  # Frequency decomposition method
+        low_freq_ratio: float = 0.3,  # Ratio of low-frequency components
+        hermite_order: int = 2,  # Order of Hermite polynomial for high-freq prediction
+        max_history: int = 3,  # Maximum history length for Hermite prediction
+        # FreqCa optimization parameters
+        freq_decomp_interval: int = 10,  # Decompose every N steps (default: 10, larger = less frequent)
+        freq_decomp_change_threshold: float = 0.01,  # Only decompose if CRF change > threshold
     ):
         """Initialize E2-CRF cache.
         
@@ -52,6 +66,13 @@ class E2CRFCache:
             tau_warn: Warning threshold for event intensity
             random_probe_ratio: Ratio of high-frequency tokens to randomly probe
             alpha_base: Base error-feedback correction strength
+            use_freqca: Enable frequency-aware caching
+            freq_decomp: Frequency decomposition method ("fft" or "dct")
+            low_freq_ratio: Ratio of low-frequency components to keep
+            hermite_order: Order of Hermite polynomial for high-frequency prediction
+            max_history: Maximum history length for Hermite prediction
+            freq_decomp_interval: Interval for frequency decomposition (larger = less frequent, default: 10)
+            freq_decomp_change_threshold: Threshold for CRF change to trigger decomposition (default: 0.01)
         """
         self.max_len = max_len
         self.num_layers = num_layers
@@ -70,6 +91,18 @@ class E2CRFCache:
         self.random_probe_ratio = random_probe_ratio
         self.alpha_base = alpha_base
         
+        # FreqCa parameters
+        self.use_freqca = use_freqca
+        self.freq_decomp = freq_decomp
+        self.low_freq_ratio = low_freq_ratio
+        self.hermite_order = hermite_order
+        self.max_history = max_history
+        # Optimization: control frequency decomposition frequency
+        self.freq_decomp_interval = freq_decomp_interval
+        self.freq_decomp_change_threshold = freq_decomp_change_threshold
+        self._last_decomp_step: int = -1  # Track last decomposition step
+        self._last_crf_for_decomp: Optional[torch.Tensor] = None  # Track last CRF used for decomposition
+        
         # Cache storage: Cache[layer_idx][token_idx] = (K, V)
         # K, V shape: (batch_size, n_head, head_dim)
         self.kv_cache: list[dict[int, tuple[torch.Tensor, torch.Tensor]]] = [
@@ -79,6 +112,13 @@ class E2CRFCache:
         # CRF storage: cumulative residual features at each layer
         # Shape: (num_layers, max_len, d_model) for single sample
         self.crf_cache: Optional[torch.Tensor] = None
+        
+        # FreqCa: Frequency-decomposed CRF cache
+        # Low-frequency: directly reused (high similarity)
+        # High-frequency: predicted using Hermite polynomials (high continuity)
+        self.crf_low_cache: Optional[torch.Tensor] = None
+        self.crf_high_history: list[torch.Tensor] = []  # History for Hermite prediction
+        self.crf_timestep_history: list[float] = []  # Corresponding timesteps
         
         # Track previous step for event intensity computation
         self.prev_crf: Optional[torch.Tensor] = None
@@ -92,6 +132,8 @@ class E2CRFCache:
             "recompute_count": 0,
             "cache_hit_count": 0,
             "total_tokens": 0,
+            "freq_decomp_count": 0,  # Track frequency decomposition count
+            "freq_decomp_skipped": 0,  # Track skipped decompositions
         }
         
         # Track previous energy for lightweight event intensity computation
@@ -101,13 +143,20 @@ class E2CRFCache:
         """Reset cache for new sampling sequence."""
         self.kv_cache = [{} for _ in range(self.num_layers)]
         self.crf_cache = None
+        self.crf_low_cache = None
+        self.crf_high_history = []
+        self.crf_timestep_history = []
         self.prev_crf = None
         self.prev_step = -1
         self.current_step = 0
+        self._last_decomp_step = -1
+        self._last_crf_for_decomp = None
         self.stats = {
             "recompute_count": 0,
             "cache_hit_count": 0,
             "total_tokens": 0,
+            "freq_decomp_count": 0,
+            "freq_decomp_skipped": 0,
         }
         self._prev_energy = None
     
@@ -118,6 +167,8 @@ class E2CRFCache:
     ) -> float:
         """Compute CRF residual event intensity.
         
+        Optimized: Use detach() instead of clone() for better performance.
+        
         Args:
             current_crf: Current cumulative residual features (num_layers, max_len, d_model)
             step: Current diffusion step
@@ -126,7 +177,11 @@ class E2CRFCache:
             Event intensity r^(i)
         """
         if self.prev_crf is None or step - self.prev_step < self.delta_step:
-            self.prev_crf = current_crf.clone()
+            # Use detach() instead of clone() for better performance
+            if current_crf.device != self.device:
+                self.prev_crf = current_crf.detach().to(self.device, non_blocking=True)
+            else:
+                self.prev_crf = current_crf.detach()
             self.prev_step = step
             return 1.0  # High intensity on first step
         
@@ -134,14 +189,18 @@ class E2CRFCache:
         z_L_current = current_crf[-1]  # (max_len, d_model)
         z_L_prev = self.prev_crf[-1]  # (max_len, d_model)
         
-        # Compute relative change
-        numerator = torch.norm(z_L_current - z_L_prev, dim=-1).pow(2).sum()
+        # Compute relative change (optimized: use in-place operations where possible)
+        diff = z_L_current - z_L_prev
+        numerator = torch.norm(diff, dim=-1).pow(2).sum()
         denominator = torch.norm(z_L_prev, dim=-1).pow(2).sum() + self.eta
         
         r = (numerator / denominator).item()
         
-        # Update previous
-        self.prev_crf = current_crf.clone()
+        # Update previous (use detach() instead of clone())
+        if current_crf.device != self.device:
+            self.prev_crf = current_crf.detach().to(self.device, non_blocking=True)
+        else:
+            self.prev_crf = current_crf.detach()
         self.prev_step = step
         
         return r
@@ -172,27 +231,41 @@ class E2CRFCache:
         
         # For cached tokens, check if they need recomputation
         if self.crf_cache is not None and self.prev_crf is not None:
-            # Compute token-wise changes
-            for k in range(self.K, self.max_len):
-                # Compute change in token k
-                delta_k = torch.norm(
-                    self.crf_cache[-1, k] - self.prev_crf[-1, k],
-                    dim=-1
-                ).item()
-                
-                # Energy-weighted threshold
-                energy_k = torch.norm(x_tilde[0, k] if x_tilde.dim() == 3 else x_tilde[k]).pow(2).item()
-                tau_k = self.tau_0 / (self.epsilon + energy_k)
-                
-                if delta_k > tau_k:
-                    S.add(k)
+            # Batch compute changes for all tokens at once (more efficient)
+            crf_current = self.crf_cache[-1, self.K:, :]  # (max_len - K, d_model)
+            crf_prev = self.prev_crf[-1, self.K:, :]  # (max_len - K, d_model)
+            
+            # Compute all deltas at once
+            deltas = torch.norm(crf_current - crf_prev, dim=-1)  # (max_len - K,)
+            
+            # Compute energy for all tokens at once
+            if x_tilde.dim() == 3:
+                x_tilde_slice = x_tilde[0, self.K:, :]  # (max_len - K, n_channels)
+            else:
+                x_tilde_slice = x_tilde[self.K:, :]
+            energies = torch.norm(x_tilde_slice, dim=-1).pow(2)  # (max_len - K,)
+            
+            # Compute thresholds for all tokens
+            tau_k_values = self.tau_0 / (self.epsilon + energies)
+            
+            # Find tokens that need recomputation
+            need_recompute = deltas > tau_k_values
+            recompute_indices = torch.nonzero(need_recompute, as_tuple=False).squeeze(-1)
+            
+            # Add to set (ensure indices are int)
+            if recompute_indices.numel() > 0:
+                if recompute_indices.dim() == 0:
+                    S.add(self.K + int(recompute_indices.item()))
+                else:
+                    S.update((self.K + int(idx.item()) for idx in recompute_indices))
         
         # Random probe of high-frequency tokens
         high_freq_tokens = list(range(self.K, self.max_len))
         num_probe = max(1, int(len(high_freq_tokens) * self.random_probe_ratio))
         if num_probe > 0 and len(high_freq_tokens) > 0:
-            probe_indices = torch.randperm(len(high_freq_tokens), device=self.device)[:num_probe]
-            S.update([high_freq_tokens[i] for i in probe_indices.cpu().tolist()])
+            # Avoid CPU-GPU sync by using tensor operations directly
+            probe_indices = torch.randperm(len(high_freq_tokens), device='cpu')[:num_probe]
+            S.update([high_freq_tokens[i] for i in probe_indices.tolist()])
         
         return S
     
@@ -210,10 +283,35 @@ class E2CRFCache:
         Returns:
             Cached (K, V) pair or None if not cached
         """
-        if layer_idx < len(self.kv_cache) and token_idx in self.kv_cache[layer_idx]:
-            self.stats["cache_hit_count"] += 1
-            return self.kv_cache[layer_idx][token_idx]
+        if layer_idx < len(self.kv_cache):
+            layer_cache = self.kv_cache[layer_idx]
+            if token_idx in layer_cache:
+                self.stats["cache_hit_count"] += 1
+                return layer_cache[token_idx]
         return None
+    
+    def get_cached_kv_batch(
+        self,
+        layer_idx: int,
+        token_indices: list[int],
+    ) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
+        """Batch get cached KV pairs for multiple tokens.
+        
+        Args:
+            layer_idx: Layer index
+            token_indices: List of token indices
+            
+        Returns:
+            Dictionary mapping token_idx to (K, V) pair
+        """
+        result = {}
+        if layer_idx < len(self.kv_cache):
+            layer_cache = self.kv_cache[layer_idx]
+            for token_idx in token_indices:
+                if token_idx in layer_cache:
+                    self.stats["cache_hit_count"] += 1
+                    result[token_idx] = layer_cache[token_idx]
+        return result
     
     def set_cached_kv(
         self,
@@ -231,19 +329,170 @@ class E2CRFCache:
             V: Value tensor
         """
         if layer_idx < len(self.kv_cache):
-            self.kv_cache[layer_idx][token_idx] = (K.detach().clone(), V.detach().clone())
+            # Only clone and move if necessary (optimize for performance)
+            if K.device != self.device:
+                # Move to device, detach to break gradient
+                K = K.detach().to(self.device, non_blocking=True)
+                V = V.detach().to(self.device, non_blocking=True)
+            else:
+                # Just detach to break gradient, no clone needed if already on device
+                K = K.detach()
+                V = V.detach()
+            self.kv_cache[layer_idx][token_idx] = (K, V)
             self.stats["recompute_count"] += 1
     
     def update_crf(
         self,
         crf: torch.Tensor,
+        timestep: Optional[float] = None,
     ) -> None:
         """Update cumulative residual features cache.
         
+        Enhanced with FreqCa: decompose CRF into low and high frequency components.
+        Low-frequency: directly cached for reuse (high similarity)
+        High-frequency: stored in history for Hermite prediction (high continuity)
+        
+        Optimized: Only perform frequency decomposition when:
+        1. Enough steps have passed since last decomposition (interval-based)
+        2. CRF has changed significantly (change threshold)
+        
         Args:
             crf: Cumulative residual features (num_layers, max_len, d_model)
+            timestep: Current diffusion timestep (for Hermite prediction)
         """
-        self.crf_cache = crf.detach().clone()
+        # Store full CRF for backward compatibility
+        if crf.device != self.device or crf.requires_grad:
+            self.crf_cache = crf.detach().to(self.device, non_blocking=True)
+        else:
+            self.crf_cache = crf.detach()
+        
+        # FreqCa: Frequency-aware caching (with optimization)
+        if self.use_freqca:
+            # Use final layer CRF for frequency decomposition
+            crf_final = crf[-1] if crf.dim() == 3 else crf  # (max_len, d_model)
+            
+            # Optimization: Check if we should perform frequency decomposition
+            should_decompose = False
+            
+            # Check 1: Interval-based (every N steps)
+            steps_since_decomp = self.current_step - self._last_decomp_step
+            if steps_since_decomp >= self.freq_decomp_interval:
+                should_decompose = True
+            
+            # Check 2: Change-based (only if CRF changed significantly)
+            if not should_decompose and self._last_crf_for_decomp is not None:
+                # Compute relative change in CRF
+                crf_change = torch.norm(crf_final - self._last_crf_for_decomp) / (
+                    torch.norm(self._last_crf_for_decomp) + self.epsilon
+                )
+                if crf_change.item() > self.freq_decomp_change_threshold:
+                    should_decompose = True
+            elif self._last_crf_for_decomp is None:
+                # First time, always decompose
+                should_decompose = True
+            
+            # Perform frequency decomposition if needed
+            if should_decompose:
+                # Decompose into low and high frequency components
+                if self.freq_decomp == "dct":
+                    crf_low, crf_high = frequency_decompose_dct(
+                        crf_final, low_freq_ratio=self.low_freq_ratio
+                    )
+                else:  # fft
+                    crf_low, crf_high = frequency_decompose_fft(
+                        crf_final, low_freq_ratio=self.low_freq_ratio
+                    )
+                
+                # Cache low-frequency component (direct reuse)
+                if crf_low.device != self.device or crf_low.requires_grad:
+                    self.crf_low_cache = crf_low.detach().to(self.device, non_blocking=True)
+                else:
+                    self.crf_low_cache = crf_low.detach()
+                
+                # Update tracking
+                self._last_decomp_step = self.current_step
+                if crf_final.device != self.device:
+                    self._last_crf_for_decomp = crf_final.detach().to(self.device, non_blocking=True)
+                else:
+                    self._last_crf_for_decomp = crf_final.detach()
+                
+                self.stats["freq_decomp_count"] += 1
+            else:
+                self.stats["freq_decomp_skipped"] += 1
+            
+            # Always store high-frequency in history for Hermite prediction (even if not decomposed)
+            # Use cached high-frequency if available, otherwise compute on-the-fly
+            if timestep is not None:
+                if should_decompose:
+                    # We just computed crf_high, use it
+                    if crf_high.device != self.device or crf_high.requires_grad:
+                        crf_high_cached = crf_high.detach().to(self.device, non_blocking=True)
+                    else:
+                        crf_high_cached = crf_high.detach()
+                else:
+                    # Reuse last high-frequency component (approximation)
+                    # This is acceptable since high-frequency changes are continuous
+                    if len(self.crf_high_history) > 0:
+                        crf_high_cached = self.crf_high_history[-1]  # Reuse last
+                    else:
+                        # Fallback: compute on-the-fly (shouldn't happen often)
+                        if self.freq_decomp == "dct":
+                            _, crf_high_cached = frequency_decompose_dct(
+                                crf_final, low_freq_ratio=self.low_freq_ratio
+                            )
+                        else:
+                            _, crf_high_cached = frequency_decompose_fft(
+                                crf_final, low_freq_ratio=self.low_freq_ratio
+                            )
+                        if crf_high_cached.device != self.device or crf_high_cached.requires_grad:
+                            crf_high_cached = crf_high_cached.detach().to(self.device, non_blocking=True)
+                        else:
+                            crf_high_cached = crf_high_cached.detach()
+                
+                self.crf_high_history.append(crf_high_cached)
+                self.crf_timestep_history.append(timestep)
+                
+                # Keep only recent history
+                if len(self.crf_high_history) > self.max_history:
+                    self.crf_high_history.pop(0)
+                    self.crf_timestep_history.pop(0)
+    
+    def predict_crf_freqca(
+        self,
+        target_timestep: float,
+    ) -> Optional[torch.Tensor]:
+        """Predict CRF at target timestep using FreqCa strategy.
+        
+        Low-frequency: directly reused from cache (high similarity)
+        High-frequency: predicted using Hermite polynomials (high continuity)
+        
+        Args:
+            target_timestep: Target diffusion timestep
+            
+        Returns:
+            Predicted CRF tensor or None if not enough history
+        """
+        if not self.use_freqca:
+            return None
+        
+        if self.crf_low_cache is None or len(self.crf_high_history) < 2:
+            return None
+        
+        # Reuse low-frequency component directly
+        crf_low_pred = self.crf_low_cache
+        
+        # Predict high-frequency component using Hermite polynomials
+        crf_high_pred = predict_hermite(
+            history=self.crf_high_history,
+            timesteps=self.crf_timestep_history,
+            target_timestep=target_timestep,
+            order=self.hermite_order
+        )
+        
+        # Reconstruct CRF: low + high
+        crf_pred = crf_low_pred + crf_high_pred
+        
+        return crf_pred
     
     def apply_error_feedback(
         self,

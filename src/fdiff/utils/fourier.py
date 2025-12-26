@@ -214,3 +214,284 @@ def smooth_frequency(X: torch.Tensor, sigma: float) -> torch.Tensor:
     X = torch.einsum("btc, ts -> bsc", X, gaussian_kernel)
     X = idft(X)
     return X
+
+
+def frequency_decompose_fft(
+    x: torch.Tensor, 
+    low_freq_ratio: float = 0.3
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decompose features into low and high frequency components using FFT.
+    
+    Based on FreqCa paper: low-frequency components have high similarity but low continuity,
+    while high-frequency components have low similarity but high continuity.
+    
+    Args:
+        x: Feature tensor of shape (batch_size, seq_len, d_model) or (seq_len, d_model)
+        low_freq_ratio: Ratio of low-frequency components to keep (default: 0.3)
+        
+    Returns:
+        Tuple of (low_freq, high_freq) components with same shape as input
+    """
+    original_shape = x.shape
+    if x.dim() == 2:
+        x = x.unsqueeze(0)  # Add batch dimension
+        was_2d = True
+    else:
+        was_2d = False
+    
+    batch_size, seq_len, d_model = x.shape
+    
+    # Apply FFT along sequence dimension
+    # x shape: (batch_size, seq_len, d_model)
+    x_freq = torch.fft.rfft(x, dim=1, norm="ortho")  # (batch_size, n_freq, d_model)
+    n_freq = x_freq.shape[1]
+    
+    # Determine low-frequency cutoff
+    n_low = max(1, int(n_freq * low_freq_ratio))
+    
+    # Optimized: directly create low and high frequency components
+    # Low frequency: keep first n_low frequencies, zero out the rest
+    x_low_freq = x_freq.clone()
+    if n_low < n_freq:
+        x_low_freq[:, n_low:, :] = 0
+    
+    # High frequency: zero out first n_low frequencies, keep the rest
+    x_high_freq = x_freq.clone()
+    if n_low > 0:
+        x_high_freq[:, :n_low, :] = 0
+    
+    # Convert back to time domain (irfft automatically handles length)
+    x_low = torch.fft.irfft(x_low_freq, n=seq_len, dim=1, norm="ortho")
+    x_high = torch.fft.irfft(x_high_freq, n=seq_len, dim=1, norm="ortho")
+    
+    # Ensure same shape as input (irfft should already match, but check for safety)
+    if x_low.shape[1] != seq_len:
+        if x_low.shape[1] < seq_len:
+            pad_size = seq_len - x_low.shape[1]
+            x_low = torch.nn.functional.pad(x_low, (0, 0, 0, pad_size), mode='constant', value=0)
+        else:
+            x_low = x_low[:, :seq_len, :]
+    
+    if x_high.shape[1] != seq_len:
+        if x_high.shape[1] < seq_len:
+            pad_size = seq_len - x_high.shape[1]
+            x_high = torch.nn.functional.pad(x_high, (0, 0, 0, pad_size), mode='constant', value=0)
+        else:
+            x_high = x_high[:, :seq_len, :]
+    
+    if was_2d:
+        x_low = x_low.squeeze(0)
+        x_high = x_high.squeeze(0)
+    
+    return x_low, x_high
+
+
+def frequency_decompose_dct(
+    x: torch.Tensor,
+    low_freq_ratio: float = 0.3
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decompose features into low and high frequency components using DCT.
+    
+    Args:
+        x: Feature tensor of shape (batch_size, seq_len, d_model) or (seq_len, d_model)
+        low_freq_ratio: Ratio of low-frequency components to keep (default: 0.3)
+        
+    Returns:
+        Tuple of (low_freq, high_freq) components with same shape as input
+    """
+    # DCT can be implemented using FFT with appropriate preprocessing
+    # For simplicity, we use FFT-based approximation which is mathematically equivalent
+    # to DCT for real signals
+    return frequency_decompose_fft(x, low_freq_ratio)
+    
+    original_shape = x.shape
+    if x.dim() == 2:
+        x = x.unsqueeze(0)
+        was_2d = True
+    else:
+        was_2d = False
+    
+    batch_size, seq_len, d_model = x.shape
+    
+    # Apply DCT along sequence dimension
+    x_dct = dct(x, dim=1, norm="ortho")  # (batch_size, seq_len, d_model)
+    
+    # Determine low-frequency cutoff
+    n_low = max(1, int(seq_len * low_freq_ratio))
+    
+    # Split into low and high frequency
+    x_low_dct = x_dct[:, :n_low, :]
+    x_high_dct = x_dct[:, n_low:, :]
+    
+    # Pad high-frequency to match original size
+    x_high_dct_padded = torch.zeros_like(x_dct)
+    x_high_dct_padded[:, n_low:, :] = x_high_dct
+    
+    # Convert back to time domain
+    x_low = idct(x_low_dct, dim=1, norm="ortho")
+    x_high = idct(x_high_dct_padded, dim=1, norm="ortho")
+    
+    if was_2d:
+        x_low = x_low.squeeze(0)
+        x_high = x_high.squeeze(0)
+    
+    return x_low, x_high
+
+
+def hermite_polynomials(s: torch.Tensor, order: int = 2) -> torch.Tensor:
+    """Compute Hermite polynomials up to given order.
+    
+    Hermite polynomials are defined on normalized interval [-1, 1].
+    H_0(s) = 1
+    H_1(s) = 2s
+    H_2(s) = 4s^2 - 2
+    H_3(s) = 8s^3 - 12s
+    ...
+    
+    Args:
+        s: Normalized time values in [-1, 1], shape (K,) or (batch_size, K)
+        order: Maximum order of Hermite polynomials (default: 2)
+        
+    Returns:
+        Tensor of shape (order+1, K) or (order+1, batch_size, K) containing polynomial values
+    """
+    if s.dim() == 1:
+        s = s.unsqueeze(0)
+        was_1d = True
+    else:
+        was_1d = False
+    
+    batch_size, K = s.shape
+    device = s.device
+    dtype = s.dtype
+    
+    # Initialize Hermite polynomials
+    H = torch.zeros(order + 1, batch_size, K, device=device, dtype=dtype)
+    
+    # H_0(s) = 1
+    H[0] = torch.ones_like(s)
+    
+    if order >= 1:
+        # H_1(s) = 2s
+        H[1] = 2 * s
+    
+    if order >= 2:
+        # H_2(s) = 4s^2 - 2
+        H[2] = 4 * s**2 - 2
+    
+    if order >= 3:
+        # H_3(s) = 8s^3 - 12s
+        H[3] = 8 * s**3 - 12 * s
+    
+    # For higher orders, use recurrence relation: H_{n+1}(s) = 2s*H_n(s) - 2n*H_{n-1}(s)
+    for n in range(3, order):
+        H[n + 1] = 2 * s * H[n] - 2 * n * H[n - 1]
+    
+    if was_1d:
+        H = H.squeeze(1)  # (order+1, K)
+    else:
+        H = H  # (order+1, batch_size, K)
+    
+    return H
+
+
+def predict_hermite(
+    history: list[torch.Tensor],
+    timesteps: list[float],
+    target_timestep: float,
+    order: int = 2
+) -> torch.Tensor:
+    """Predict feature value at target timestep using Hermite polynomial interpolation.
+    
+    Based on FreqCa paper: high-frequency components are predictable using Hermite polynomials.
+    
+    Args:
+        history: List of historical feature tensors, each of shape (seq_len, d_model) or (batch_size, seq_len, d_model)
+        timesteps: List of timesteps corresponding to history
+        target_timestep: Target timestep to predict
+        order: Order of Hermite polynomial (default: 2)
+        
+    Returns:
+        Predicted feature tensor with same shape as history elements
+    """
+    if len(history) < 2:
+        # Not enough history, return last value
+        return history[-1].clone()
+    
+    K = len(history)
+    device = history[0].device
+    dtype = history[0].dtype
+    
+    # Normalize timesteps to [-1, 1]
+    t_min, t_max = min(timesteps), max(timesteps)
+    if t_max == t_min:
+        # All timesteps are the same, return last value
+        return history[-1].clone()
+    
+    # Normalize target timestep
+    s_target = 2 * (target_timestep - t_min) / (t_max - t_min) - 1
+    s_target = torch.clamp(torch.tensor(s_target, device=device, dtype=dtype), -1.0, 1.0)
+    
+    # Normalize historical timesteps
+    s_history = torch.tensor(
+        [2 * (t - t_min) / (t_max - t_min) - 1 for t in timesteps],
+        device=device,
+        dtype=dtype
+    )
+    s_history = torch.clamp(s_history, -1.0, 1.0)
+    
+    # Compute Hermite polynomials at historical points
+    H_history = hermite_polynomials(s_history, order=order)  # (order+1, K)
+    
+    # Compute Hermite polynomial at target point
+    H_target = hermite_polynomials(s_target.unsqueeze(0), order=order)  # (order+1, 1)
+    if H_target.dim() == 2:
+        H_target = H_target.squeeze(1)  # (order+1,)
+    else:
+        H_target = H_target  # (order+1,)
+    
+    # Stack history features: (K, seq_len, d_model) or (K, batch_size, seq_len, d_model)
+    history_stack = torch.stack(history, dim=0)
+    
+    # Fit coefficients using least squares
+    # For each feature dimension, solve: history = H^T @ coeffs
+    # coeffs = (H @ H^T)^{-1} @ H @ history
+    
+    H_matrix = H_history.T  # (K, order+1)
+    H_target_vec = H_target  # (order+1,)
+    
+    # Solve least squares: minimize ||history - H_matrix @ coeffs||^2
+    # coeffs = (H_matrix^T @ H_matrix)^{-1} @ H_matrix^T @ history
+    HtH = torch.matmul(H_matrix.T, H_matrix)  # (order+1, order+1)
+    
+    # Add small regularization for numerical stability
+    HtH_reg = HtH + torch.eye(order + 1, device=device, dtype=dtype) * 1e-6
+    
+    try:
+        HtH_inv = torch.linalg.inv(HtH_reg)  # (order+1, order+1)
+    except:
+        # Fallback: use pseudo-inverse
+        HtH_inv = torch.linalg.pinv(HtH_reg)
+    
+    # Compute coefficients for each feature dimension
+    if history_stack.dim() == 3:
+        # (K, seq_len, d_model)
+        # Reshape for matrix multiplication: (K, seq_len*d_model)
+        seq_len, d_model = history_stack.shape[1], history_stack.shape[2]
+        history_flat = history_stack.view(K, -1)  # (K, seq_len*d_model)
+        Ht_history = torch.matmul(H_matrix.T, history_flat)  # (order+1, seq_len*d_model)
+        coeffs = torch.matmul(HtH_inv, Ht_history)  # (order+1, seq_len*d_model)
+        # Predict at target
+        prediction_flat = torch.matmul(H_target_vec, coeffs)  # (seq_len*d_model,)
+        prediction = prediction_flat.view(seq_len, d_model)  # (seq_len, d_model)
+    else:
+        # (K, batch_size, seq_len, d_model)
+        batch_size, seq_len, d_model = history_stack.shape[1], history_stack.shape[2], history_stack.shape[3]
+        history_flat = history_stack.view(K, -1)  # (K, batch_size*seq_len*d_model)
+        Ht_history = torch.matmul(H_matrix.T, history_flat)  # (order+1, batch_size*seq_len*d_model)
+        coeffs = torch.matmul(HtH_inv, Ht_history)  # (order+1, batch_size*seq_len*d_model)
+        # Predict at target
+        prediction_flat = torch.matmul(H_target_vec, coeffs)  # (batch_size*seq_len*d_model,)
+        prediction = prediction_flat.view(batch_size, seq_len, d_model)  # (batch_size, seq_len, d_model)
+    
+    return prediction

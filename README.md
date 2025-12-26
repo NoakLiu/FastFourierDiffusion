@@ -178,11 +178,11 @@ The `model_id` is the `run_id` generated during training. You can find it in sev
 Run the speedup benchmark to compare cached vs. non-cached inference:
 
 ```shell
-# Use latest model (recommended for quick test)
+# Use latest model
 python cmd/benchmark_cache.py model_id=latest num_samples=10 num_diffusion_steps=100
 
 # Or specify a specific model_id
-python cmd/benchmark_cache.py model_id=03wb0ssr num_samples=10 num_diffusion_steps=100
+python cmd/benchmark_cache.py model_id=q5x6ifzc num_samples=10 num_diffusion_steps=100
 ```
 
 This will output:

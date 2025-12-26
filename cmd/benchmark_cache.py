@@ -103,8 +103,11 @@ def main(cfg: DictConfig) -> None:
         weights_only=False
     )
     score_model.eval()
+    # Move to appropriate device
     if torch.cuda.is_available():
         score_model = score_model.cuda()
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        score_model = score_model.to('mps')
     
     num_samples = cfg.get("num_samples", 10)
     num_diffusion_steps = cfg.get("num_diffusion_steps", 100)

@@ -14,6 +14,7 @@ from fdiff.models.transformer import (
     PositionalEncoding,
     TimeEncoding,
 )
+from fdiff.models.cached_transformer import CachedTransformerEncoderLayer
 from fdiff.schedulers.sde import SDE
 from fdiff.utils.caching import E2CRFCache
 from fdiff.utils.dataclasses import DiffusableBatch
@@ -55,12 +56,17 @@ class ScoreModule(pl.LightningModule):
         self.time_encoder = self.set_time_encoder()
         self.embedder = nn.Linear(in_features=n_channels, out_features=d_model)
         self.unembedder = nn.Linear(in_features=d_model, out_features=n_channels)
+        
+        # Use standard transformer layer (can be replaced with cached version when caching is enabled)
         transformer_layer = nn.TransformerEncoderLayer(
             d_model=d_model, nhead=n_head, batch_first=True
         )
         self.backbone = nn.TransformerEncoder(
             encoder_layer=transformer_layer, num_layers=num_layers
         )
+        
+        # Cached layers (created when caching is enabled)
+        self.cached_backbone: Optional[nn.ModuleList] = None
 
         # Save all hyperparameters for checkpointing
         self.save_hyperparameters()
@@ -68,6 +74,7 @@ class ScoreModule(pl.LightningModule):
         # Caching support
         self.cache: Optional[E2CRFCache] = None
         self.use_cache: bool = False
+        self.cached_backbone: Optional[nn.ModuleList] = None
 
     def forward(
         self, 
@@ -95,7 +102,7 @@ class ScoreModule(pl.LightningModule):
         X = self.time_encoder(X, timesteps)
 
         # Backbone with caching support
-        if self.use_cache and recompute_tokens is not None:
+        if self.use_cache and recompute_tokens is not None and self.cached_backbone is not None:
             X, crf = self._forward_with_cache(X, recompute_tokens, step)
         else:
             # Standard forward pass
@@ -117,7 +124,7 @@ class ScoreModule(pl.LightningModule):
         recompute_tokens: set[int],
         step: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass with caching support.
+        """Forward pass with caching support using cached transformer layers.
         
         Args:
             X: Input tensor (batch_size, max_len, d_model)
@@ -131,35 +138,47 @@ class ScoreModule(pl.LightningModule):
         crf_list = []
         h = X  # Initial embedding
         
-        # If we need to recompute all tokens, use standard forward pass
+        # If we need to recompute all tokens, use standard forward pass (faster)
         if len(recompute_tokens) == self.max_len:
-            # Standard forward pass
             h_new = self.backbone(h)
-            crf = torch.stack([h_new[0]], dim=0)  # Single layer for simplicity
+            # Extract CRF from all layers (use detach for performance)
+            crf_list = []
+            temp_h = h
+            for layer in self.backbone.layers:
+                temp_h = layer(temp_h)
+                crf_list.append(temp_h[0].detach())
+            crf = torch.stack(crf_list, dim=0)
             return h_new, crf
         
-        # Process through each transformer layer
-        # Note: Full token-level selective computation requires custom transformer implementation
-        # For now, we compute all tokens but track statistics for demonstration
-        for layer_idx, layer in enumerate(self.backbone.layers):
-            h_new = layer(h)
+        # Use cached transformer layers for selective computation
+        if self.cached_backbone is None:
+            # Fallback to standard computation if cached backbone not initialized
+            h_new = self.backbone(h)
+            crf_list = []
+            temp_h = h
+            for layer in self.backbone.layers:
+                temp_h = layer(temp_h)
+                crf_list.append(temp_h[0].detach())
+            crf = torch.stack(crf_list, dim=0)
+            return h_new, crf
+        
+        # Process through cached transformer layers
+        for layer_idx, layer in enumerate(self.cached_backbone):
+            h_new = layer(h, recompute_tokens=recompute_tokens)
             
-            # Update cache statistics (for demonstration purposes)
-            # In a full implementation, we would selectively compute only recompute_tokens
-            if self.cache is not None:
-                num_recompute = len(recompute_tokens)
-                num_cached = self.max_len - num_recompute
-                # Update stats (multiply by num_layers to account for all layers)
-                self.cache.stats["recompute_count"] += num_recompute
-                self.cache.stats["cache_hit_count"] += num_cached
-            
-            # Store CRF (cumulative residual feature)
-            crf_list.append(h_new.clone())
+            # Store CRF (cumulative residual feature) - take first batch element
+            # h_new shape: (batch_size, max_len, d_model)
+            # CRF shape per layer: (max_len, d_model)
+            # Use detach() instead of clone() for better performance
+            if h_new.dim() == 3:
+                crf_list.append(h_new[0].detach())  # Take first batch element, detach to break gradient
+            else:
+                crf_list.append(h_new.detach())
             h = h_new
         
-        # Stack CRF from all layers: (num_layers, batch_size, max_len, d_model)
-        # For single sample, take first batch element
-        crf = torch.stack([c[0] for c in crf_list], dim=0)  # (num_layers, max_len, d_model)
+        # Stack CRF from all layers: (num_layers, max_len, d_model)
+        # Each element in crf_list should be (max_len, d_model)
+        crf = torch.stack(crf_list, dim=0)  # (num_layers, max_len, d_model)
         
         return h, crf
     
@@ -193,6 +212,60 @@ class ScoreModule(pl.LightningModule):
             )
         self.cache = cache
         self.use_cache = True
+        
+        # Create cached transformer layers
+        if self.cached_backbone is None:
+            # Get device from model
+            try:
+                device = next(self.parameters()).device
+            except StopIteration:
+                device = torch.device("cpu")
+            
+            self.cached_backbone = nn.ModuleList()
+            for layer_idx, orig_layer in enumerate(self.backbone.layers):
+                # Get dim_feedforward and dropout from original layer
+                dim_feedforward = 2048
+                dropout = 0.1
+                if hasattr(orig_layer, 'linear1') and orig_layer.linear1 is not None:
+                    linear1 = orig_layer.linear1
+                    if hasattr(linear1, 'out_features') and isinstance(linear1.out_features, (int, torch.Tensor)):
+                        dim_feedforward = int(linear1.out_features) if isinstance(linear1.out_features, int) else int(linear1.out_features.item())
+                if hasattr(orig_layer, 'dropout1') and orig_layer.dropout1 is not None:
+                    dropout_val = getattr(orig_layer.dropout1, 'p', 0.1)
+                    if isinstance(dropout_val, (int, float)):
+                        dropout = float(dropout_val)
+                
+                # Get nhead from original layer
+                nhead = getattr(orig_layer.self_attn, 'num_heads', n_head)
+                
+                # Create cached layer with same parameters on correct device
+                cached_layer = CachedTransformerEncoderLayer(
+                    d_model=self.d_model,
+                    nhead=nhead,
+                    dim_feedforward=dim_feedforward,
+                    dropout=dropout,
+                    batch_first=True,
+                ).to(device)
+                
+                # Copy weights from original layer using state_dict
+                orig_state = orig_layer.state_dict()
+                cached_state = cached_layer.state_dict()
+                
+                # Map original layer state to cached layer state
+                # Ensure tensors are on the same device
+                for key in cached_state.keys():
+                    if key in orig_state:
+                        orig_tensor = orig_state[key]
+                        # Move to device if needed
+                        if isinstance(orig_tensor, torch.Tensor) and orig_tensor.device != device:
+                            orig_tensor = orig_tensor.to(device)
+                        cached_state[key] = orig_tensor
+                
+                cached_layer.load_state_dict(cached_state, strict=False)
+                
+                # Set cache reference
+                cached_layer.set_cache(cache, layer_idx)
+                self.cached_backbone.append(cached_layer)
     
     def disable_caching(self) -> None:
         """Disable caching."""
