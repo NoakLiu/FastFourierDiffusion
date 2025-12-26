@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Literal
 
 import torch
 from tqdm import tqdm
@@ -8,6 +8,7 @@ from fdiff.schedulers.sde import SDE
 from fdiff.utils.caching import E2CRFCache
 from fdiff.utils.dataclasses import DiffusableBatch
 from fdiff.utils.fourier import dft, idft
+from fdiff.utils.fresca import apply_fresca_to_score, analyze_frequency_content
 
 
 class DiffusionSampler:
@@ -17,6 +18,12 @@ class DiffusionSampler:
         sample_batch_size: int,
         use_cache: bool = False,
         cache_kwargs: Optional[dict] = None,
+        # FreSca parameters
+        use_fresca: bool = False,
+        fresca_low_scale: float = 1.0,
+        fresca_high_scale: float = 1.5,
+        fresca_cutoff_ratio: float = 0.5,
+        fresca_cutoff_strategy: Literal["spatial", "energy"] = "energy",
     ) -> None:
         self.score_model = score_model
         self.noise_scheduler = score_model.noise_scheduler
@@ -30,6 +37,13 @@ class DiffusionSampler:
         if use_cache:
             cache_kwargs = cache_kwargs or {}
             self.score_model.enable_caching(**cache_kwargs)
+        
+        # FreSca support
+        self.use_fresca = use_fresca
+        self.fresca_low_scale = fresca_low_scale
+        self.fresca_high_scale = fresca_high_scale
+        self.fresca_cutoff_ratio = fresca_cutoff_ratio
+        self.fresca_cutoff_strategy = fresca_cutoff_strategy
 
     def reverse_diffusion_step(
         self, 
@@ -61,6 +75,23 @@ class DiffusionSampler:
         else:
             score = self.score_model(batch)
         
+        # Apply FreSca frequency scaling if enabled
+        if self.use_fresca:
+            timestep_val = timesteps[0].item() if hasattr(timesteps[0], 'item') else float(timesteps[0])
+            # Ensure cutoff_strategy is correct type
+            cutoff_strategy: Literal["spatial", "energy"] = (
+                "energy" if self.fresca_cutoff_strategy == "energy" else "spatial"
+            )
+            score = apply_fresca_to_score(
+                score,
+                low_scale=self.fresca_low_scale,
+                high_scale=self.fresca_high_scale,
+                cutoff_ratio=self.fresca_cutoff_ratio,
+                cutoff_strategy=cutoff_strategy,
+                timestep=timestep_val,
+                num_steps=getattr(self, '_num_diffusion_steps', None),
+            )
+        
         # Apply a step of reverse diffusion
         output = self.noise_scheduler.step(
             model_output=score, timestep=timesteps[0].item(), sample=X
@@ -74,6 +105,10 @@ class DiffusionSampler:
     def sample(
         self, num_samples: int, num_diffusion_steps: Optional[int] = None
     ) -> torch.Tensor:
+        # Store num_diffusion_steps for FreSca dynamic scheduling
+        if num_diffusion_steps is not None:
+            self._num_diffusion_steps = num_diffusion_steps
+        
         # Set the score model in eval mode and move it to GPU
         self.score_model.eval()
 

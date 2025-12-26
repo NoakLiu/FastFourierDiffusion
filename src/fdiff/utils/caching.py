@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 
 from fdiff.utils.fourier import frequency_decompose_fft, frequency_decompose_dct, predict_hermite
+from fdiff.utils.fresca import analyze_frequency_content
 
 
 class E2CRFCache:
@@ -48,6 +49,9 @@ class E2CRFCache:
         # FreqCa optimization parameters
         freq_decomp_interval: int = 10,  # Decompose every N steps (default: 10, larger = less frequent)
         freq_decomp_change_threshold: float = 0.01,  # Only decompose if CRF change > threshold
+        # FreSca integration parameters
+        use_fresca_in_cache: bool = False,  # Use FreSca frequency analysis for cache optimization
+        fresca_adaptive_threshold: bool = True,  # Adaptively adjust thresholds based on frequency content
     ):
         """Initialize E2-CRF cache.
         
@@ -102,6 +106,11 @@ class E2CRFCache:
         self.freq_decomp_change_threshold = freq_decomp_change_threshold
         self._last_decomp_step: int = -1  # Track last decomposition step
         self._last_crf_for_decomp: Optional[torch.Tensor] = None  # Track last CRF used for decomposition
+        
+        # FreSca integration
+        self.use_fresca_in_cache = use_fresca_in_cache
+        self.fresca_adaptive_threshold = fresca_adaptive_threshold
+        self._last_freq_analysis: Optional[dict] = None  # Store last frequency analysis
         
         # Cache storage: Cache[layer_idx][token_idx] = (K, V)
         # K, V shape: (batch_size, n_head, head_dim)
@@ -213,6 +222,8 @@ class E2CRFCache:
     ) -> set[int]:
         """Determine which tokens to recompute based on event-driven trigger.
         
+        Enhanced with FreSca: uses frequency analysis to optimize recompute decisions.
+        
         Args:
             x_tilde: Frequency domain representation (batch_size, max_len, n_channels)
             event_intensity: Current event intensity
@@ -228,6 +239,32 @@ class E2CRFCache:
         if event_intensity > self.tau_warn:
             # Recompute all tokens if intensity is very high
             return set(range(self.max_len))
+        
+        # FreSca: Analyze frequency content to optimize cache decisions
+        adaptive_tau_0 = self.tau_0
+        if self.use_fresca_in_cache and self.crf_cache is not None:
+            try:
+                # Analyze frequency content of current CRF
+                crf_final = self.crf_cache[-1]  # (max_len, d_model)
+                freq_analysis = analyze_frequency_content(
+                    crf_final.unsqueeze(0),  # Add batch dimension
+                    cutoff_ratio=self.low_freq_ratio if hasattr(self, 'low_freq_ratio') else 0.3
+                )
+                self._last_freq_analysis = freq_analysis
+                
+                # Adaptive threshold based on frequency content
+                if self.fresca_adaptive_threshold:
+                    # If high-frequency energy is low, we can be more aggressive with caching
+                    high_freq_ratio = freq_analysis["high_energy_ratio"].item()
+                    if high_freq_ratio < 0.2:
+                        # Low high-frequency content: more aggressive caching (higher threshold)
+                        adaptive_tau_0 = self.tau_0 * 1.5
+                    elif high_freq_ratio > 0.5:
+                        # High high-frequency content: more conservative caching (lower threshold)
+                        adaptive_tau_0 = self.tau_0 * 0.7
+            except Exception:
+                # Fallback to default if frequency analysis fails
+                adaptive_tau_0 = self.tau_0
         
         # For cached tokens, check if they need recomputation
         if self.crf_cache is not None and self.prev_crf is not None:
@@ -245,8 +282,8 @@ class E2CRFCache:
                 x_tilde_slice = x_tilde[self.K:, :]
             energies = torch.norm(x_tilde_slice, dim=-1).pow(2)  # (max_len - K,)
             
-            # Compute thresholds for all tokens
-            tau_k_values = self.tau_0 / (self.epsilon + energies)
+            # Compute thresholds for all tokens (using adaptive threshold if FreSca enabled)
+            tau_k_values = adaptive_tau_0 / (self.epsilon + energies)
             
             # Find tokens that need recomputation
             need_recompute = deltas > tau_k_values

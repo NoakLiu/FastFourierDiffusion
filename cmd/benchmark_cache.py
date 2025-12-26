@@ -25,7 +25,17 @@ from fdiff.utils.caching import E2CRFCache
 from fdiff.schedulers.sde import VPScheduler, VEScheduler
 torch.serialization.add_safe_globals([VPScheduler, VEScheduler])
 
-plt.style.use("science")
+# Disable LaTeX rendering to avoid errors when LaTeX is not installed
+import matplotlib
+matplotlib.rcParams['text.usetex'] = False
+matplotlib.rcParams['mathtext.default'] = 'regular'
+
+try:
+    plt.style.use("science")
+except Exception:
+    # Fallback if scienceplots is not available
+    plt.style.use("seaborn-v0_8")
+    
 warnings.filterwarnings("ignore")
 
 
@@ -35,6 +45,8 @@ def benchmark_sampling(
     num_diffusion_steps: int = 100,
     use_cache: bool = False,
     cache_kwargs: Optional[dict] = None,
+    use_fresca: bool = False,
+    fresca_kwargs: Optional[dict] = None,
 ) -> dict:
     """Benchmark sampling with or without caching.
     
@@ -48,11 +60,21 @@ def benchmark_sampling(
     Returns:
         Dictionary with timing and statistics
     """
+    # Prepare FreSca kwargs
+    fresca_kwargs = fresca_kwargs or {}
+    if use_fresca:
+        fresca_kwargs.setdefault("fresca_low_scale", 1.0)
+        fresca_kwargs.setdefault("fresca_high_scale", 1.5)
+        fresca_kwargs.setdefault("fresca_cutoff_ratio", 0.5)
+        fresca_kwargs.setdefault("fresca_cutoff_strategy", "energy")
+    
     sampler = DiffusionSampler(
         score_model=score_model,
         sample_batch_size=1,
         use_cache=use_cache,
         cache_kwargs=cache_kwargs,
+        use_fresca=use_fresca,
+        **fresca_kwargs,
     )
     
     # Reset cache before benchmarking to get accurate statistics
@@ -153,7 +175,25 @@ def main(cfg: DictConfig) -> None:
         num_diffusion_steps=num_diffusion_steps,
         use_cache=True,
         cache_kwargs={},
+        use_fresca=False,
     )
+    
+    # Benchmark with caching + FreSca
+    print("\n2b. Benchmarking WITH E2-CRF caching + FreSca...")
+    results_cache_fresca = benchmark_sampling(
+        score_model=score_model,
+        num_samples=num_samples,
+        num_diffusion_steps=num_diffusion_steps,
+        use_cache=True,
+        cache_kwargs={"use_fresca_in_cache": True},
+        use_fresca=True,
+        fresca_kwargs={"fresca_high_scale": 1.5, "fresca_cutoff_ratio": 0.5},
+    )
+    time_cache_fresca = results_cache_fresca["elapsed_time"]
+    speedup_fresca = time_no_cache / time_cache_fresca
+    print(f"   Time: {time_cache_fresca:.2f}s")
+    print(f"   Speedup: {speedup_fresca:.2f}x")
+    print(f"   Improvement over cache-only: {time_cache / time_cache_fresca:.2f}x")
     time_cache = results_cache["elapsed_time"]
     cache_stats = results_cache["cache_stats"]
     speedup = time_no_cache / time_cache
@@ -208,6 +248,21 @@ def main(cfg: DictConfig) -> None:
         "Freq Decomp Count": cache_stats.get('freq_decomp_count', 0) if cache_stats else 0,
     })
     
+    # Add cache + FreSca
+    cache_fresca_stats = results_cache_fresca.get("cache_stats", {})
+    all_results.append({
+        "Config": "E2-CRF + FreSca",
+        "Parameter": "fresca",
+        "Value": None,
+        "Time (s)": time_cache_fresca,
+        "Speedup": speedup_fresca,
+        "Time per Sample (s)": time_cache_fresca / num_samples,
+        "Time per Step (s)": time_cache_fresca / (num_samples * num_diffusion_steps),
+        "Cache Hit Ratio": cache_fresca_stats.get('cache_hit_ratio', 0) if cache_fresca_stats else 0.0,
+        "Cache Ratio": cache_fresca_stats.get('cache_ratio', 0) if cache_fresca_stats else 0.0,
+        "Freq Decomp Count": cache_fresca_stats.get('freq_decomp_count', 0) if cache_fresca_stats else 0,
+    })
+    
     # Add ablation results
     ablation_results = []
     
@@ -221,6 +276,7 @@ def main(cfg: DictConfig) -> None:
             num_diffusion_steps=num_diffusion_steps,
             use_cache=True,
             cache_kwargs={"K": K},
+            use_fresca=False,
         )
         time_k = results["elapsed_time"]
         speedup_k = time_no_cache / time_k
@@ -250,6 +306,7 @@ def main(cfg: DictConfig) -> None:
             num_diffusion_steps=num_diffusion_steps,
             use_cache=True,
             cache_kwargs={"R": R},
+            use_fresca=False,
         )
         time_r = results["elapsed_time"]
         speedup_r = time_no_cache / time_r
@@ -279,6 +336,7 @@ def main(cfg: DictConfig) -> None:
             num_diffusion_steps=num_diffusion_steps,
             use_cache=True,
             cache_kwargs={"tau_0": tau_0},
+            use_fresca=False,
         )
         time_tau = results["elapsed_time"]
         speedup_tau = time_no_cache / time_tau
@@ -308,6 +366,7 @@ def main(cfg: DictConfig) -> None:
             num_diffusion_steps=num_diffusion_steps,
             use_cache=True,
             cache_kwargs={"freq_decomp_interval": interval},
+            use_fresca=False,
         )
         time_interval = results["elapsed_time"]
         speedup_interval = time_no_cache / time_interval
@@ -326,6 +385,37 @@ def main(cfg: DictConfig) -> None:
             "Cache Hit Ratio": cache_hit,
             "Cache Ratio": stats_interval.get('cache_ratio', 0),
             "Freq Decomp Count": freq_decomp,
+        })
+    
+    # Ablation: FreSca high-frequency scaling
+    print("\n7. Ablation: Varying FreSca high_scale...")
+    for h_scale in [1.0, 1.2, 1.5, 2.0]:
+        print(f"   h_scale={h_scale}: ", end="", flush=True)
+        results = benchmark_sampling(
+            score_model=score_model,
+            num_samples=num_samples,
+            num_diffusion_steps=num_diffusion_steps,
+            use_cache=True,
+            cache_kwargs={"use_fresca_in_cache": True},
+            use_fresca=True,
+            fresca_kwargs={"fresca_high_scale": h_scale, "fresca_cutoff_ratio": 0.5},
+        )
+        time_fresca = results["elapsed_time"]
+        speedup_fresca = time_no_cache / time_fresca
+        stats_fresca = results.get("cache_stats", {})
+        cache_hit = stats_fresca.get('cache_hit_ratio', 0)
+        print(f"Time: {time_fresca:.2f}s, Speedup: {speedup_fresca:.2f}x, Hit: {cache_hit:.1%}")
+        ablation_results.append({
+            "Config": f"FreSca h={h_scale}",
+            "Parameter": "fresca_high_scale",
+            "Value": h_scale,
+            "Time (s)": time_fresca,
+            "Speedup": speedup_fresca,
+            "Time per Sample (s)": time_fresca / num_samples,
+            "Time per Step (s)": time_fresca / (num_samples * num_diffusion_steps),
+            "Cache Hit Ratio": cache_hit,
+            "Cache Ratio": stats_fresca.get('cache_ratio', 0),
+            "Freq Decomp Count": stats_fresca.get('freq_decomp_count', 0),
         })
     
     all_results.extend(ablation_results)
@@ -378,6 +468,9 @@ def create_visualizations(
         output_dir: Output directory for saving figures
         model_id: Model ID for filename
     """
+    # Disable LaTeX to avoid errors
+    matplotlib.rcParams['text.usetex'] = False
+    
     figures_dir = output_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
     
@@ -389,7 +482,7 @@ def create_visualizations(
     colors = ['#2ecc71' if x > 1.0 else '#e74c3c' for x in df_plot["Speedup"]]
     bars = ax.barh(df_plot["Config"], df_plot["Speedup"], color=colors)
     ax.axvline(x=1.0, color='black', linestyle='--', linewidth=1, label='Baseline (1.0x)')
-    ax.set_xlabel("Speedup (×)", fontsize=12)
+    ax.set_xlabel("Speedup (x)", fontsize=12)
     ax.set_title(f"Cache Performance Comparison - {model_id}", fontsize=14, fontweight='bold')
     ax.legend()
     ax.grid(axis='x', alpha=0.3)
@@ -424,7 +517,7 @@ def create_visualizations(
         cmap='viridis_r',
     )
     ax.set_xlabel("Cache Hit Ratio", fontsize=12)
-    ax.set_ylabel("Speedup (×)", fontsize=12)
+    ax.set_ylabel("Speedup (x)", fontsize=12)
     ax.set_title(f"Cache Hit Ratio vs Speedup - {model_id}", fontsize=14, fontweight='bold')
     ax.grid(alpha=0.3)
     plt.colorbar(scatter, ax=ax, label='Time (s)')
@@ -446,7 +539,7 @@ def create_visualizations(
         ax1.plot(df_param["Value"], df_param["Speedup"], marker='o', linewidth=2, markersize=8)
         ax1.axhline(y=1.0, color='black', linestyle='--', linewidth=1, alpha=0.5)
         ax1.set_xlabel(f"{param} Value", fontsize=12)
-        ax1.set_ylabel("Speedup (×)", fontsize=12)
+        ax1.set_ylabel("Speedup (x)", fontsize=12)
         ax1.set_title(f"Speedup vs {param}", fontsize=13, fontweight='bold')
         ax1.grid(alpha=0.3)
         
