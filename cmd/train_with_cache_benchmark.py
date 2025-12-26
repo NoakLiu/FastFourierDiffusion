@@ -27,8 +27,8 @@ from fdiff.utils.wandb import maybe_initialize_wandb
 
 def benchmark_cache_performance(
     score_model: ScoreModule,
-    num_samples: int = 10,
-    num_diffusion_steps: int = 100,
+    num_samples: int = 5,
+    num_diffusion_steps: int = 5,
     cache_kwargs: Optional[dict] = None,
     use_fresca: bool = False,
     fresca_kwargs: Optional[dict] = None,
@@ -66,8 +66,8 @@ def benchmark_cache_performance(
         use_cache=False,
     )
     
-    # Warmup
-    _ = sampler_no_cache.sample(num_samples=1, num_diffusion_steps=10)
+    # Warmup (reduced steps for faster benchmark)
+    _ = sampler_no_cache.sample(num_samples=1, num_diffusion_steps=5)
     
     # Benchmark
     start_time = time.time()
@@ -93,8 +93,8 @@ def benchmark_cache_performance(
     if score_model.cache is not None:
         score_model.cache.reset()
     
-    # Warmup
-    _ = sampler_with_cache.sample(num_samples=1, num_diffusion_steps=10)
+    # Warmup (reduced steps for faster benchmark)
+    _ = sampler_with_cache.sample(num_samples=1, num_diffusion_steps=5)
     
     # Reset cache again after warmup
     if score_model.cache is not None:
@@ -226,10 +226,13 @@ def main(cfg: DictConfig) -> None:
     print("\n" + "=" * 80)
     print("Training completed! Starting cache performance benchmark...")
     print("=" * 80)
+    print("Note: Using reduced parameters for faster benchmark.")
+    print("      Override with: cache_benchmark.num_samples=X cache_benchmark.num_diffusion_steps=Y")
+    print("=" * 80)
     
-    # Get benchmark parameters from config or use defaults
-    num_samples = cfg.get("cache_benchmark", {}).get("num_samples", 10)
-    num_diffusion_steps = cfg.get("cache_benchmark", {}).get("num_diffusion_steps", 100)
+    # Get benchmark parameters from config or use defaults (reduced for faster benchmark)
+    num_samples = cfg.get("cache_benchmark", {}).get("num_samples", 5)
+    num_diffusion_steps = cfg.get("cache_benchmark", {}).get("num_diffusion_steps", 50)
     cache_kwargs = cfg.get("cache_benchmark", {}).get("cache_kwargs", {})
     use_fresca = cfg.get("cache_benchmark", {}).get("use_fresca", False)
     fresca_kwargs = cfg.get("cache_benchmark", {}).get("fresca_kwargs", {})

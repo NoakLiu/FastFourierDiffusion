@@ -6,9 +6,10 @@ defaults:
 
 # Cache benchmark configuration (optional)
 # These parameters control the cache performance benchmark after training
+# Reduced defaults for faster benchmark (can be overridden via command line)
 cache_benchmark:
-  num_samples: 10  # Number of samples for benchmark
-  num_diffusion_steps: 100  # Number of diffusion steps
+  num_samples: 5  # Number of samples for benchmark (reduced for speed)
+  num_diffusion_steps: 5  # Number of diffusion steps (reduced for speed)
   cache_kwargs: {}  # Cache configuration (e.g., {"K": 5, "tau_0": 0.1})
   use_fresca: false  # Whether to test with FreSca
   fresca_kwargs: {}  # FreSca configuration if use_fresca=true

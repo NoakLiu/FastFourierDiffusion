@@ -1,0 +1,39 @@
+# Diffusion Method Comparison Callback
+# Compares different diffusion methods at the end of each epoch
+
+- _target_: fdiff.utils.callbacks.DiffusionMethodComparisonCallback
+  every_n_epochs: 1  # Compare every epoch
+  num_samples: 3  # Small number for fast comparison
+  warmup_steps: 2  # Minimal warmup
+  methods:
+    - name: baseline
+      num_diffusion_steps: 5
+      use_cache: false
+    - name: cache_default
+      num_diffusion_steps: 5
+      use_cache: true
+      cache_kwargs: {}
+    - name: cache_k5
+      num_diffusion_steps: 5
+      use_cache: true
+      cache_kwargs:
+        K: 5
+        tau_0: 0.1
+    - name: cache_k10
+      num_diffusion_steps: 5
+      use_cache: true
+      cache_kwargs:
+        K: 10
+        tau_0: 0.1
+    # Uncomment to test FreSca
+    # - name: cache_fresca
+    #   num_diffusion_steps: 5
+    #   use_cache: true
+    #   cache_kwargs: {}
+    #   use_fresca: true
+    #   fresca_kwargs:
+    #     fresca_low_scale: 1.0
+    #     fresca_high_scale: 1.5
+    #     fresca_cutoff_ratio: 0.5
+    #     fresca_cutoff_strategy: "energy"
+
