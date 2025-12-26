@@ -192,7 +192,9 @@ class E2CRFCache:
             else:
                 self.prev_crf = current_crf.detach()
             self.prev_step = step
-            return 1.0  # High intensity on first step
+            # Return lower intensity on first step to allow caching
+            # Only return high intensity if this is truly the first step (step == 0)
+            return 0.1 if step > 0 else 1.0
         
         # Use final layer CRF
         z_L_current = current_crf[-1]  # (max_len, d_model)
@@ -283,7 +285,11 @@ class E2CRFCache:
             energies = torch.norm(x_tilde_slice, dim=-1).pow(2)  # (max_len - K,)
             
             # Compute thresholds for all tokens (using adaptive threshold if FreSca enabled)
-            tau_k_values = adaptive_tau_0 / (self.epsilon + energies)
+            # Use relative energy (normalized by mean) to avoid very small thresholds
+            # This ensures thresholds are comparable across different energy scales
+            energy_mean = energies.mean()
+            energies_normalized = energies / (energy_mean + self.epsilon)
+            tau_k_values = adaptive_tau_0 / (self.epsilon + energies_normalized)
             
             # Find tokens that need recomputation
             need_recompute = deltas > tau_k_values
