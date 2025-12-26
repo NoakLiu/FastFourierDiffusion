@@ -548,7 +548,7 @@ class E2CRFCache:
         cached_tokens = sum(len(cache) for cache in self.kv_cache)
         cache_ratio = cached_tokens / total_tokens if total_tokens > 0 else 0.0
         
-        return {
+        stats = {
             "cached_tokens": cached_tokens,
             "total_tokens": total_tokens,
             "cache_ratio": cache_ratio,
@@ -561,3 +561,15 @@ class E2CRFCache:
                 else 0.0
             ),
         }
+        
+        # Add FreqCa statistics if available
+        if "freq_decomp_count" in self.stats:
+            stats["freq_decomp_count"] = self.stats["freq_decomp_count"]
+            stats["freq_decomp_skipped"] = self.stats["freq_decomp_skipped"]
+            total_decomp_ops = stats["freq_decomp_count"] + stats["freq_decomp_skipped"]
+            if total_decomp_ops > 0:
+                stats["freq_decomp_ratio"] = stats["freq_decomp_count"] / total_decomp_ops
+            else:
+                stats["freq_decomp_ratio"] = 0.0
+        
+        return stats
