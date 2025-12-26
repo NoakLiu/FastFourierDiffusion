@@ -177,23 +177,6 @@ def main(cfg: DictConfig) -> None:
         cache_kwargs={},
         use_fresca=False,
     )
-    
-    # Benchmark with caching + FreSca
-    print("\n2b. Benchmarking WITH E2-CRF caching + FreSca...")
-    results_cache_fresca = benchmark_sampling(
-        score_model=score_model,
-        num_samples=num_samples,
-        num_diffusion_steps=num_diffusion_steps,
-        use_cache=True,
-        cache_kwargs={"use_fresca_in_cache": True},
-        use_fresca=True,
-        fresca_kwargs={"fresca_high_scale": 1.5, "fresca_cutoff_ratio": 0.5},
-    )
-    time_cache_fresca = results_cache_fresca["elapsed_time"]
-    speedup_fresca = time_no_cache / time_cache_fresca
-    print(f"   Time: {time_cache_fresca:.2f}s")
-    print(f"   Speedup: {speedup_fresca:.2f}x")
-    print(f"   Improvement over cache-only: {time_cache / time_cache_fresca:.2f}x")
     time_cache = results_cache["elapsed_time"]
     cache_stats = results_cache["cache_stats"]
     speedup = time_no_cache / time_cache
@@ -215,6 +198,26 @@ def main(cfg: DictConfig) -> None:
             if cache_stats.get('freq_decomp_count', 0) > 0:
                 avg_steps_per_decomp = cache_stats.get('current_step', num_diffusion_steps) / cache_stats.get('freq_decomp_count', 1)
                 print(f"   - Avg steps per decomposition: {avg_steps_per_decomp:.1f}")
+    
+    # Benchmark with caching + FreSca
+    print("\n2b. Benchmarking WITH E2-CRF caching + FreSca...")
+    results_cache_fresca = benchmark_sampling(
+        score_model=score_model,
+        num_samples=num_samples,
+        num_diffusion_steps=num_diffusion_steps,
+        use_cache=True,
+        cache_kwargs={"use_fresca_in_cache": True},
+        use_fresca=True,
+        fresca_kwargs={"fresca_high_scale": 1.5, "fresca_cutoff_ratio": 0.5},
+    )
+    time_cache_fresca = results_cache_fresca["elapsed_time"]
+    speedup_fresca = time_no_cache / time_cache_fresca
+    cache_fresca_stats = results_cache_fresca.get("cache_stats", {})
+    print(f"   Time: {time_cache_fresca:.2f}s")
+    print(f"   Speedup: {speedup_fresca:.2f}x")
+    print(f"   Improvement over cache-only: {time_cache / time_cache_fresca:.2f}x")
+    if cache_fresca_stats:
+        print(f"   Cache hit ratio: {cache_fresca_stats.get('cache_hit_ratio', 0):.2%}")
     
     
     # Collect all results for visualization
