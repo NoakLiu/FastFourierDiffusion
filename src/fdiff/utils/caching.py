@@ -224,93 +224,43 @@ class E2CRFCache:
     ) -> set[int]:
         """Determine which tokens to recompute based on event-driven trigger.
         
-        Enhanced with FreSca: uses frequency analysis to optimize recompute decisions.
+        MACRO-LEVEL CACHING STRATEGY:
+        - Fixed interval recomputation: only recompute every N steps
+        - Simple rule: always recompute first K tokens, cache the rest
+        - Skip expensive computations (event intensity, delta checks) most of the time
         
         Args:
             x_tilde: Frequency domain representation (batch_size, max_len, n_channels)
-            event_intensity: Current event intensity
+            event_intensity: Current event intensity (may be ignored for macro strategy)
             step: Current diffusion step
             
         Returns:
             Set of token indices to recompute
         """
-        # Always recompute low-frequency tokens
-        S = set(range(min(self.K, self.max_len)))
+        # MACRO STRATEGY: Fixed interval caching
+        # Only recompute at fixed intervals, otherwise use cached values
+        recompute_interval = max(1, self.R)  # Use R as the recompute interval
         
-        # If high event intensity, recompute more tokens
-        if event_intensity > self.tau_warn:
-            # Recompute all tokens if intensity is very high
-            return set(range(self.max_len))
+        # Check if we should recompute at this step
+        should_recompute_all = (step % recompute_interval == 0) or (step == 0)
         
-        # FreSca: Analyze frequency content to optimize cache decisions
-        adaptive_tau_0 = self.tau_0
-        if self.use_fresca_in_cache and self.crf_cache is not None:
-            try:
-                # Analyze frequency content of current CRF
-                crf_final = self.crf_cache[-1]  # (max_len, d_model)
-                freq_analysis = analyze_frequency_content(
-                    crf_final.unsqueeze(0),  # Add batch dimension
-                    cutoff_ratio=self.low_freq_ratio if hasattr(self, 'low_freq_ratio') else 0.3
-                )
-                self._last_freq_analysis = freq_analysis
-                
-                # Adaptive threshold based on frequency content
-                if self.fresca_adaptive_threshold:
-                    # If high-frequency energy is low, we can be more aggressive with caching
-                    high_freq_ratio = freq_analysis["high_energy_ratio"].item()
-                    if high_freq_ratio < 0.2:
-                        # Low high-frequency content: more aggressive caching (higher threshold)
-                        adaptive_tau_0 = self.tau_0 * 1.5
-                    elif high_freq_ratio > 0.5:
-                        # High high-frequency content: more conservative caching (lower threshold)
-                        adaptive_tau_0 = self.tau_0 * 0.7
-            except Exception:
-                # Fallback to default if frequency analysis fails
-                adaptive_tau_0 = self.tau_0
-        
-        # For cached tokens, check if they need recomputation
-        if self.crf_cache is not None and self.prev_crf is not None:
-            # Batch compute changes for all tokens at once (more efficient)
-            crf_current = self.crf_cache[-1, self.K:, :]  # (max_len - K, d_model)
-            crf_prev = self.prev_crf[-1, self.K:, :]  # (max_len - K, d_model)
+        if should_recompute_all:
+            # Full recomputation: always recompute low-frequency tokens
+            # For high-frequency tokens, use simple heuristic
+            S = set(range(min(self.K, self.max_len)))
             
-            # Compute all deltas at once
-            deltas = torch.norm(crf_current - crf_prev, dim=-1)  # (max_len - K,)
+            # Simple heuristic: if event intensity is very high, recompute more
+            if event_intensity > self.tau_warn:
+                # Recompute all tokens periodically
+                return set(range(self.max_len))
             
-            # Compute energy for all tokens at once
-            if x_tilde.dim() == 3:
-                x_tilde_slice = x_tilde[0, self.K:, :]  # (max_len - K, n_channels)
-            else:
-                x_tilde_slice = x_tilde[self.K:, :]
-            energies = torch.norm(x_tilde_slice, dim=-1).pow(2)  # (max_len - K,)
-            
-            # Compute thresholds for all tokens (using adaptive threshold if FreSca enabled)
-            # Use relative energy (normalized by mean) to avoid very small thresholds
-            # This ensures thresholds are comparable across different energy scales
-            energy_mean = energies.mean()
-            energies_normalized = energies / (energy_mean + self.epsilon)
-            tau_k_values = adaptive_tau_0 / (self.epsilon + energies_normalized)
-            
-            # Find tokens that need recomputation
-            need_recompute = deltas > tau_k_values
-            recompute_indices = torch.nonzero(need_recompute, as_tuple=False).squeeze(-1)
-            
-            # Add to set (ensure indices are int)
-            if recompute_indices.numel() > 0:
-                if recompute_indices.dim() == 0:
-                    S.add(self.K + int(recompute_indices.item()))
-                else:
-                    S.update((self.K + int(idx.item()) for idx in recompute_indices))
-        
-        # Random probe of high-frequency tokens
-        high_freq_tokens = list(range(self.K, self.max_len))
-        num_probe = max(1, int(len(high_freq_tokens) * self.random_probe_ratio))
-        if num_probe > 0 and len(high_freq_tokens) > 0:
-            # Avoid CPU-GPU sync by using tensor operations directly
-            probe_indices = torch.randperm(len(high_freq_tokens), device='cpu')[:num_probe]
-            S.update([high_freq_tokens[i] for i in probe_indices.tolist()])
-        
-        return S
+            # Otherwise, only recompute low-frequency tokens (K tokens)
+            # High-frequency tokens will be cached
+            return S
+        else:
+            # CACHED MODE: Only recompute low-frequency tokens
+            # All high-frequency tokens use cache (no expensive checks)
+            return set(range(min(self.K, self.max_len)))
     
     def get_cached_kv(
         self,

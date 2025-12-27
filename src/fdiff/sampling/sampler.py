@@ -169,45 +169,46 @@ class DiffusionSampler:
                     batch = DiffusableBatch(X=X, y=None, timesteps=timesteps)
                     
                     # Determine which tokens to recompute (for caching)
+                    # MACRO STRATEGY: Skip expensive computations most of the time
                     recompute_tokens = None
                     if self.use_cache and self.score_model.cache is not None:
                         cache = self.score_model.cache
                         cache.current_step = step_idx
                         
-                        # Convert to frequency domain for event intensity computation
-                        X_tilde = dft(X)
+                        # MACRO OPTIMIZATION: Only compute event intensity at fixed intervals
+                        # Skip expensive DFT and CRF computations most of the time
+                        recompute_interval = max(1, cache.R)
+                        should_compute_intensity = (step_idx % recompute_interval == 0) or (step_idx == 0)
                         
-                        # Compute event intensity using CRF if available
-                        # Try FreqCa prediction first, then fallback to cached CRF
-                        event_intensity = 1.0
-                        crf_for_intensity = None
-                        
-                        if cache.use_freqca:
-                            # Try to predict CRF using FreqCa
-                            predicted_crf = cache.predict_crf_freqca(target_timestep=t_val)
-                            if predicted_crf is not None:
-                                crf_for_intensity = predicted_crf.unsqueeze(0) if predicted_crf.dim() == 2 else predicted_crf
-                        
-                        # Fallback to cached CRF if prediction not available
-                        if crf_for_intensity is None and cache.crf_cache is not None:
-                            # Use final layer CRF for intensity computation
-                            crf_final = cache.crf_cache[-1] if cache.crf_cache.dim() == 3 else cache.crf_cache
-                            crf_for_intensity = crf_final.unsqueeze(0) if crf_final.dim() == 2 else crf_final
-                        
-                        if crf_for_intensity is not None:
-                            # Stack to match expected shape (num_layers, max_len, d_model)
-                            if crf_for_intensity.dim() == 2:
-                                crf_for_intensity = crf_for_intensity.unsqueeze(0)
-                            # Expand to match num_layers if needed
-                            if crf_for_intensity.shape[0] == 1 and cache.num_layers > 1:
-                                crf_for_intensity = crf_for_intensity.repeat(cache.num_layers, 1, 1)
-                            event_intensity = cache.compute_event_intensity(
-                                crf_for_intensity, step_idx
-                            )
+                        if should_compute_intensity:
+                            # Only compute event intensity at intervals
+                            X_tilde = dft(X)
+                            
+                            # Compute event intensity using CRF if available
+                            event_intensity = 0.1  # Default low intensity
+                            crf_for_intensity = None
+                            
+                            if cache.crf_cache is not None:
+                                # Use cached CRF for intensity computation (simplified)
+                                crf_final = cache.crf_cache[-1] if cache.crf_cache.dim() == 3 else cache.crf_cache
+                                crf_for_intensity = crf_final.unsqueeze(0) if crf_final.dim() == 2 else crf_final
+                                
+                                if crf_for_intensity is not None:
+                                    # Stack to match expected shape
+                                    if crf_for_intensity.dim() == 2:
+                                        crf_for_intensity = crf_for_intensity.unsqueeze(0)
+                                    if crf_for_intensity.shape[0] == 1 and cache.num_layers > 1:
+                                        crf_for_intensity = crf_for_intensity.repeat(cache.num_layers, 1, 1)
+                                    event_intensity = cache.compute_event_intensity(
+                                        crf_for_intensity, step_idx
+                                    )
                         else:
-                            event_intensity = 1.0  # High intensity on first step
+                            # Skip expensive computations - use cached decision
+                            # Use dummy x_tilde (not actually used in macro strategy)
+                            X_tilde = torch.zeros(1, cache.max_len, 1, device=X.device)
+                            event_intensity = 0.1  # Low intensity to favor caching
                         
-                        # Determine recompute set using the cache's method
+                        # Determine recompute set using macro strategy
                         recompute_tokens = cache.determine_recompute_set(
                             X_tilde, event_intensity, step_idx
                         )
