@@ -126,6 +126,9 @@ class DiffusionSampler:
         # Compute the required amount of batches
         num_batches = max(1, num_samples // self.sample_batch_size)
 
+        # Global step counter for consistent caching across samples
+        global_step = 0
+
         # No need to track gradients when sampling
         with torch.no_grad():
             for batch_idx in tqdm(
@@ -143,9 +146,11 @@ class DiffusionSampler:
                 # Sample from noise distribution
                 X = self.sample_prior(batch_size)
                 
-                # Reset cache for new batch
-                if self.use_cache and self.score_model.cache is not None:
+                # Reset cache for new batch (only if this is the first batch)
+                # This allows cache to persist across samples for better performance
+                if self.use_cache and self.score_model.cache is not None and batch_idx == 0:
                     self.score_model.cache.reset()
+                    global_step = 0  # Reset global step counter when cache is reset
 
                 # Perform the diffusion step by step
                 timestep_list = list(self.noise_scheduler.timesteps)
@@ -173,44 +178,16 @@ class DiffusionSampler:
                     recompute_tokens = None
                     if self.use_cache and self.score_model.cache is not None:
                         cache = self.score_model.cache
-                        cache.current_step = step_idx
+                        # Use global_step for consistent caching across samples
+                        cache.current_step = global_step
                         
-                        # MACRO OPTIMIZATION: Only compute event intensity at fixed intervals
-                        # Skip expensive DFT and CRF computations most of the time
-                        recompute_interval = max(1, cache.R)
-                        should_compute_intensity = (step_idx % recompute_interval == 0) or (step_idx == 0)
-                        
-                        if should_compute_intensity:
-                            # Only compute event intensity at intervals
-                            X_tilde = dft(X)
-                            
-                            # Compute event intensity using CRF if available
-                            event_intensity = 0.1  # Default low intensity
-                            crf_for_intensity = None
-                            
-                            if cache.crf_cache is not None:
-                                # Use cached CRF for intensity computation (simplified)
-                                crf_final = cache.crf_cache[-1] if cache.crf_cache.dim() == 3 else cache.crf_cache
-                                crf_for_intensity = crf_final.unsqueeze(0) if crf_final.dim() == 2 else crf_final
-                                
-                                if crf_for_intensity is not None:
-                                    # Stack to match expected shape
-                                    if crf_for_intensity.dim() == 2:
-                                        crf_for_intensity = crf_for_intensity.unsqueeze(0)
-                                    if crf_for_intensity.shape[0] == 1 and cache.num_layers > 1:
-                                        crf_for_intensity = crf_for_intensity.repeat(cache.num_layers, 1, 1)
-                                    event_intensity = cache.compute_event_intensity(
-                                        crf_for_intensity, step_idx
-                                    )
-                        else:
-                            # Skip expensive computations - use cached decision
-                            # Use dummy x_tilde (not actually used in macro strategy)
-                            X_tilde = torch.zeros(1, cache.max_len, 1, device=X.device)
-                            event_intensity = 0.1  # Low intensity to favor caching
-                        
-                        # Determine recompute set using macro strategy
+                        # OPTIMIZATION: Skip all expensive computations for macro strategy
+                        # determine_recompute_set only uses step and simple heuristics
+                        # No need to compute X_tilde or event_intensity
                         recompute_tokens = cache.determine_recompute_set(
-                            X_tilde, event_intensity, step_idx
+                            x_tilde=None,  # Not used in macro strategy
+                            event_intensity=0.1,  # Default low intensity
+                            step=global_step
                         )
                     
                     # Return denoised X
@@ -219,6 +196,9 @@ class DiffusionSampler:
                         step=step_idx,
                         recompute_tokens=recompute_tokens
                     )
+                    
+                    # Increment global step counter
+                    global_step += 1
 
                 # Add the samples to the list
                 all_samples.append(X.cpu())

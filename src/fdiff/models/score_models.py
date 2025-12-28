@@ -138,17 +138,30 @@ class ScoreModule(pl.LightningModule):
         crf_list = []
         h = X  # Initial embedding
         
-        # If we need to recompute all tokens, use standard forward pass (faster)
+        # OPTIMIZATION: If we need to recompute all tokens, use standard forward pass (faster)
+        # But still use cached layers so they can populate the cache efficiently
         if len(recompute_tokens) == self.max_len:
-            h_new = self.backbone(h)
-            # Extract CRF from all layers (use detach for performance)
-            crf_list = []
-            temp_h = h
-            for layer in self.backbone.layers:
-                temp_h = layer(temp_h)
-                crf_list.append(temp_h[0].detach())
-            crf = torch.stack(crf_list, dim=0)
-            return h_new, crf
+            if self.cached_backbone is not None:
+                # Use cached layers (they'll use standard attention internally when recomputing all)
+                crf_list = []
+                h_temp = h
+                for layer_idx, layer in enumerate(self.cached_backbone):
+                    h_temp = layer(h_temp, recompute_tokens=recompute_tokens)
+                    # Store CRF (cumulative residual feature) - take first batch element
+                    crf_list.append(h_temp[0].detach())
+                h_new = h_temp
+                crf = torch.stack(crf_list, dim=0)
+                return h_new, crf
+            else:
+                # Fallback to standard backbone
+                h_new = self.backbone(h)
+                crf_list = []
+                temp_h = h
+                for layer in self.backbone.layers:
+                    temp_h = layer(temp_h)
+                    crf_list.append(temp_h[0].detach())
+                crf = torch.stack(crf_list, dim=0)
+                return h_new, crf
         
         # Use cached transformer layers for selective computation
         if self.cached_backbone is None:
@@ -163,18 +176,22 @@ class ScoreModule(pl.LightningModule):
             return h_new, crf
         
         # Process through cached transformer layers
+        h_temp = h
         for layer_idx, layer in enumerate(self.cached_backbone):
-            h_new = layer(h, recompute_tokens=recompute_tokens)
+            h_temp = layer(h_temp, recompute_tokens=recompute_tokens)
             
             # Store CRF (cumulative residual feature) - take first batch element
-            # h_new shape: (batch_size, max_len, d_model)
+            # h_temp shape: (batch_size, max_len, d_model)
             # CRF shape per layer: (max_len, d_model)
             # Use detach() instead of clone() for better performance
-            if h_new.dim() == 3:
-                crf_list.append(h_new[0].detach())  # Take first batch element, detach to break gradient
+            if h_temp.dim() == 3:
+                crf_list.append(h_temp[0].detach())  # Take first batch element, detach to break gradient
             else:
-                crf_list.append(h_new.detach())
-            h = h_new
+                crf_list.append(h_temp.detach())
+        
+        h_new = h_temp
+        crf = torch.stack(crf_list, dim=0)
+        return h_new, crf
         
         # Stack CRF from all layers: (num_layers, max_len, d_model)
         # Each element in crf_list should be (max_len, d_model)
@@ -205,8 +222,6 @@ class ScoreModule(pl.LightningModule):
             cache = E2CRFCache(
                 max_len=self.max_len,
                 num_layers=len(self.backbone.layers),
-                d_model=self.d_model,
-                n_head=n_head,
                 device=device,
                 **cache_kwargs
             )
