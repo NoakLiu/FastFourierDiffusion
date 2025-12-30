@@ -40,6 +40,16 @@ pip install freqdiff
    ```
    
    Note: Other datasets (NASDAQ, NASA, etc.) will be automatically downloaded when you run training if Kaggle API is configured.
+   
+   To manually download USDroughts and NASA datasets:
+   
+   ```shell
+   # USDroughts
+   kaggle datasets download -d cdminix/us-drought-meteorological-data -p data --unzip
+   
+   # NASA Battery
+   kaggle datasets download -d patrickfleith/nasa-battery-dataset -p data --unzip
+   ```
 
 When the packages are installed and datasets are downloaded, you are ready to train diffusion models!
 
@@ -55,8 +65,8 @@ python cmd/train.py
 By default, this command will train a score model in the time domain with the `ecg` dataset for 200 epochs. To reduce the number of epochs, you can use:
 
 ```shell
-# example for training with 10 epochs (quick test)
-python cmd/train.py trainer.max_epochs=10
+# example for training with 1 epochs (quick test)
+python cmd/train.py trainer.max_epochs=1
 ```
 
 In order to modify other hyperparameters, you can use [hydra override syntax](https://hydra.cc/docs/advanced/override_grammar/basic/). The following hyperparameters can be modified to retrain all the models appearing in the paper:

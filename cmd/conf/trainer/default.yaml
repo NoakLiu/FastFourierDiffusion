@@ -1,6 +1,6 @@
 _target_: pytorch_lightning.Trainer
 accelerator: auto
-max_epochs: 3  # Reduced for faster training and comparison
+max_epochs: 1  # Single epoch for quick training and comparison
 gradient_clip_val: 1.0
 enable_progress_bar: true
 logger:

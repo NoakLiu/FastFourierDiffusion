@@ -1,7 +1,7 @@
 model_path: ${hydra:runtime.cwd}/lightning_logs
 model_id: ub0lv98f
-num_samples: 10000
-num_diffusion_steps: 1000
+num_samples: 100  # Reduced for faster sampling
+num_diffusion_steps: 100  # Reduced for faster sampling
 random_seed: 42
 
 defaults:

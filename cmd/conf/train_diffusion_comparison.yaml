@@ -1,0 +1,50 @@
+# Training config for diffusion method comparison (1 epoch)
+# This config trains for 1 epoch and compares different diffusion methods
+
+defaults:
+  - _self_
+  - trainer: default
+  - datamodule: ecg
+  - score_model: default
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
+
+random_seed: 42
+
+# Override trainer to add comparison callback
+trainer:
+  max_epochs: 1  # Single epoch for quick comparison
+  callbacks:
+    - _target_: fdiff.utils.callbacks.DiffusionMethodComparisonCallback
+      every_n_epochs: 1
+      num_samples: 5  # Small number for fast comparison
+      warmup_steps: 2
+      methods:
+        - name: "baseline"
+          num_diffusion_steps: 10
+          use_cache: false
+        - name: "cache_default"
+          num_diffusion_steps: 10
+          use_cache: true
+          cache_kwargs: {}  # Default: K=5, R=10
+        - name: "cache_k3"
+          num_diffusion_steps: 10
+          use_cache: true
+          cache_kwargs:
+            K: 3
+        - name: "cache_k10"
+          num_diffusion_steps: 10
+          use_cache: true
+          cache_kwargs:
+            K: 10
+        - name: "cache_r5"
+          num_diffusion_steps: 10
+          use_cache: true
+          cache_kwargs:
+            R: 5
+        - name: "cache_r50"
+          num_diffusion_steps: 10
+          use_cache: true
+          cache_kwargs:
+            R: 50
+

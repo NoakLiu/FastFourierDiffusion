@@ -34,10 +34,28 @@ class SamplingRunner:
 
         # Save sampling config to model directory
         self.save_dir = self.model_path / self.model_id
+        
+        # Check if model directory exists
+        if not self.save_dir.exists():
+            available_models = [d.name for d in self.model_path.iterdir() if d.is_dir()] if self.model_path.exists() else []
+            raise FileNotFoundError(
+                f"Model directory not found: {self.save_dir}\n"
+                f"Available model IDs: {', '.join(available_models[:10])}" + 
+                (f" (and {len(available_models) - 10} more)" if len(available_models) > 10 else "")
+            )
+        
+        # Create directory if it doesn't exist (should already exist from training)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
         OmegaConf.save(config=cfg, f=self.save_dir / "sample_config.yaml")
 
         # Read training config from model directory and instantiate the right datamodule
-        train_cfg = OmegaConf.load(self.save_dir / "train_config.yaml")
+        train_cfg_path = self.save_dir / "train_config.yaml"
+        if not train_cfg_path.exists():
+            raise FileNotFoundError(
+                f"Training config not found: {train_cfg_path}\n"
+                f"This model may not have been trained yet."
+            )
+        train_cfg = OmegaConf.load(train_cfg_path)
         self.datamodule: Datamodule = instantiate(train_cfg.datamodule)
         self.fourier_transform: bool = self.datamodule.fourier_transform
         self.datamodule.prepare_data()
@@ -49,8 +67,11 @@ class SamplingRunner:
         # Load score model from checkpoint
         best_checkpoint_path = get_best_checkpoint(self.save_dir / "checkpoints")
         model_type = get_model_type(train_cfg)
+        # Use weights_only=False for PyTorch 2.6+ compatibility
+        # (checkpoints contain custom classes like VPScheduler)
         self.score_model = model_type.load_from_checkpoint(
-            checkpoint_path=best_checkpoint_path
+            checkpoint_path=best_checkpoint_path,
+            weights_only=False
         )
         if torch.cuda.is_available():
             self.score_model.to(device=torch.device("cuda"))
