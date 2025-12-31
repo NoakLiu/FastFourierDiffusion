@@ -50,6 +50,27 @@ pip install freqdiff
    # NASA Battery
    kaggle datasets download -d patrickfleith/nasa-battery-dataset -p data --unzip
    ```
+   
+   **Usage after download**: The datasets will be automatically preprocessed when you first use them. You can:
+   
+   - **Train with these datasets**:
+     ```shell
+     python cmd/train.py datamodule=nasa
+     python cmd/train.py datamodule=usdroughts
+     ```
+   
+   - **Use in notebooks**: Simply create the datamodule and call `setup()`, preprocessing will run automatically:
+     ```python
+     from fdiff.dataloaders.datamodules import NASADatamodule, USDroughtsDatamodule
+     
+     # NASA dataset
+     nasa_dm = NASADatamodule(data_dir=Path("data"))
+     nasa_dm.setup()  # Preprocessing runs automatically if needed
+     
+     # USDroughts dataset
+     droughts_dm = USDroughtsDatamodule(data_dir=Path("data"))
+     droughts_dm.setup()  # Preprocessing runs automatically if needed
+     ```
 
 When the packages are installed and datasets are downloaded, you are ready to train diffusion models!
 
