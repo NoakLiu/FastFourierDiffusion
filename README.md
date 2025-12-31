@@ -55,8 +55,13 @@ pip install freqdiff
    
    - **Train with these datasets**:
      ```shell
-     python cmd/train.py datamodule=nasa
-     python cmd/train.py datamodule=usdroughts
+     # Time domain models
+     python cmd/train.py datamodule=nasa datamodule.subdataset=charge fourier_transform=false
+     python cmd/train.py datamodule=usdroughts fourier_transform=false
+     
+     # Frequency domain models
+     python cmd/train.py datamodule=nasa datamodule.subdataset=charge fourier_transform=true
+     python cmd/train.py datamodule=usdroughts fourier_transform=true
      ```
    
    - **Use in notebooks**: Simply create the datamodule and call `setup()`, preprocessing will run automatically:
@@ -99,6 +104,46 @@ In order to modify other hyperparameters, you can use [hydra override syntax](ht
 | datamodule.subdataset | For the NASA dataset only. Selects between the charge and discharge subsets. | charge, discharge |
 | datamodule.smoother_width | For the ECG dataset only. Width of the Gaussian kernel smoother applied in the frequency domain. | $\mathbb{R}^+$
 | score_model | The backbone to use for the score model. | default, lstm |
+
+#### Training Examples
+
+**Time Domain vs Frequency Domain:**
+
+```shell
+# Train a time domain model (default)
+python cmd/train.py datamodule=ecg fourier_transform=false
+
+# Train a frequency domain model
+python cmd/train.py datamodule=ecg fourier_transform=true
+```
+
+**NASA Dataset with Different Subsets:**
+
+```shell
+# Train time domain model on NASA charge dataset
+python cmd/train.py datamodule=nasa datamodule.subdataset=charge fourier_transform=false
+
+# Train frequency domain model on NASA charge dataset
+python cmd/train.py datamodule=nasa datamodule.subdataset=charge fourier_transform=true
+
+# Train time domain model on NASA discharge dataset
+python cmd/train.py datamodule=nasa datamodule.subdataset=discharge fourier_transform=false
+
+# Train frequency domain model on NASA discharge dataset
+python cmd/train.py datamodule=nasa datamodule.subdataset=discharge fourier_transform=true
+```
+
+**Other Datasets:**
+
+```shell
+# USDroughts dataset
+python cmd/train.py datamodule=usdroughts fourier_transform=false
+python cmd/train.py datamodule=usdroughts fourier_transform=true
+
+# NASDAQ dataset
+python cmd/train.py datamodule=nasdaq fourier_transform=false
+python cmd/train.py datamodule=nasdaq fourier_transform=true
+```
 
 At the end of training, your model is stored in the `lightning_logs` directory, in a folder named after the current `run_id`. You can find the `run_id` in the logs of the training and in the [wandb dashboard](https://wandb.ai/) if you have correctly configured wandb.
 
