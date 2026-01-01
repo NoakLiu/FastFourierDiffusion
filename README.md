@@ -149,6 +149,36 @@ At the end of training, your model is stored in the `lightning_logs` directory, 
 
 **Example:** After training, you might see a folder like `lightning_logs/03wb0ssr/`. In this case, `03wb0ssr` is your `model_id`.
 
+#### Complete Training & Sampling Guide
+
+**Training** (for each dataset, run both time and frequency domain):
+```shell
+# ECG
+python cmd/train.py datamodule=ecg fourier_transform=false
+python cmd/train.py datamodule=ecg fourier_transform=true
+
+# NASA Charge/Discharge
+python cmd/train.py datamodule=nasa datamodule.subdataset=charge fourier_transform=false
+python cmd/train.py datamodule=nasa datamodule.subdataset=charge fourier_transform=true
+python cmd/train.py datamodule=nasa datamodule.subdataset=discharge fourier_transform=false
+python cmd/train.py datamodule=nasa datamodule.subdataset=discharge fourier_transform=true
+
+# USDroughts, NASDAQ
+python cmd/train.py datamodule=usdroughts fourier_transform=false
+python cmd/train.py datamodule=usdroughts fourier_transform=true
+python cmd/train.py datamodule=nasdaq fourier_transform=false
+python cmd/train.py datamodule=nasdaq fourier_transform=true
+```
+
+**Sampling** (replace `<model_id>` with actual model_id from `lightning_logs`):
+```shell
+# Standard sampling
+python cmd/sample.py model_id=<model_id> num_samples=200 num_diffusion_steps=1000
+
+# With cache (frequency domain models only, 2-4× faster)
+python cmd/sample.py model_id=<model_id> +sampler.use_cache=true +sampler.cache_kwargs='{}' num_samples=200 num_diffusion_steps=1000
+```
+
 ### 2.2 Sample
 
 In order to sample from a trained model, you can simply run the following command:
