@@ -174,19 +174,28 @@ class DiffusionSampler:
                     batch = DiffusableBatch(X=X, y=None, timesteps=timesteps)
                     
                     # Determine which tokens to recompute (for caching)
-                    # MACRO STRATEGY: Skip expensive computations most of the time
+                    # E2-CRF: Use frequency domain representation for adaptive caching
                     recompute_tokens = None
                     if self.use_cache and self.score_model.cache is not None:
                         cache = self.score_model.cache
                         # Use global_step for consistent caching across samples
                         cache.current_step = global_step
                         
-                        # OPTIMIZATION: Skip all expensive computations for macro strategy
-                        # determine_recompute_set only uses step and simple heuristics
-                        # No need to compute X_tilde or event_intensity
+                        # Get frequency domain representation for E2-CRF
+                        # If model uses fourier_transform, X is already in frequency domain
+                        # Check if model uses frequency domain via scale_noise attribute
+                        x_tilde_for_cache = X if getattr(self.score_model, 'scale_noise', False) else None
+                        
+                        # Compute event intensity if CRF is available
+                        event_intensity = 0.1  # Default
+                        if cache.crf_cache is not None:
+                            # Use previous CRF to estimate intensity (approximate)
+                            # Full intensity computation requires current CRF, which we don't have yet
+                            event_intensity = 0.1  # Conservative estimate
+                        
                         recompute_tokens = cache.determine_recompute_set(
-                            x_tilde=None,  # Not used in macro strategy
-                            event_intensity=0.1,  # Default low intensity
+                            x_tilde=x_tilde_for_cache,
+                            event_intensity=event_intensity,
                             step=global_step
                         )
                     
