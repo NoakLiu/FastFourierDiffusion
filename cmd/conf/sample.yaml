@@ -3,6 +3,8 @@ model_id: ub0lv98f
 num_samples: 100  # Reduced for faster sampling
 num_diffusion_steps: 100  # Reduced for faster sampling
 random_seed: 42
+use_cache: false  # Enable E2-CRF cache for sampling
+cache_kwargs: {}  # Cache parameters (K, R, tau_0, etc.)
 
 defaults:
   - _self_

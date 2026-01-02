@@ -14,7 +14,6 @@ from omegaconf import DictConfig
 
 from fdiff.models.score_models import ScoreModule
 from fdiff.sampling.sampler import DiffusionSampler
-from fdiff.sampling.metrics import compute_metrics
 from fdiff.utils.caching import E2CRFCache
 
 # Fix for PyTorch 2.6+ weights_only loading
@@ -25,7 +24,7 @@ torch.serialization.add_safe_globals([VPScheduler, VEScheduler])
 def run_ablation(
     score_model: ScoreModule,
     num_samples: int = 20,
-    num_diffusion_steps: int = 100,
+    num_diffusion_steps: int = 2,
     config_name: str = "baseline",
     cache_kwargs: Optional[dict] = None,
     use_cache: bool = False,
@@ -96,8 +95,15 @@ def main(cfg: DictConfig) -> None:
         checkpoint_path = log_dir / model_id / "checkpoints" / "*.ckpt"
         checkpoint_files = list(checkpoint_path.parent.glob(checkpoint_path.name))
         if not checkpoint_files:
-            raise ValueError(f"No checkpoint found for model_id: {model_id}")
-        checkpoint_path = checkpoint_files[0]
+            # Fallback to latest if specified model not found
+            print(f"Warning: Model {model_id} not found. Trying to use latest model...")
+            checkpoints = list(log_dir.glob("*/checkpoints/*.ckpt"))
+            if not checkpoints:
+                raise ValueError(f"No checkpoint found for model_id: {model_id}, and no checkpoints found")
+            checkpoint_path = max(checkpoints, key=lambda p: p.stat().st_mtime)
+            print(f"Using latest model instead: {checkpoint_path.parent.parent.name}")
+        else:
+            checkpoint_path = checkpoint_files[0]
     
     # Use weights_only=False for PyTorch 2.6+ compatibility
     score_model = ScoreModule.load_from_checkpoint(
@@ -109,7 +115,7 @@ def main(cfg: DictConfig) -> None:
         score_model = score_model.cuda()
     
     num_samples = cfg.get("num_samples", 20)
-    num_diffusion_steps = cfg.get("num_diffusion_steps", 100)
+    num_diffusion_steps = cfg.get("num_diffusion_steps", 5)
     
     print("=" * 80)
     print("E2-CRF Caching Ablation Study")
@@ -168,7 +174,7 @@ def main(cfg: DictConfig) -> None:
         config_name="No error feedback",
         use_cache=True,
         cache_kwargs={
-            "R": 999999,  # Effectively disable error-feedback
+            "R": 999999,  
             "tau_warn": 999999,
         },
     )

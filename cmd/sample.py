@@ -76,9 +76,19 @@ class SamplingRunner:
         if torch.cuda.is_available():
             self.score_model.to(device=torch.device("cuda"))
 
-        # Instantiate sampler
+        # Instantiate sampler (with optional cache support)
         sampler_partial = instantiate(cfg.sampler)
-        self.sampler: DiffusionSampler = sampler_partial(score_model=self.score_model)
+        # Add cache support if specified in config
+        use_cache = cfg.get("use_cache", False)
+        cache_kwargs = cfg.get("cache_kwargs", {})
+        if use_cache:
+            self.sampler: DiffusionSampler = sampler_partial(
+                score_model=self.score_model,
+                use_cache=True,
+                cache_kwargs=cache_kwargs
+            )
+        else:
+            self.sampler: DiffusionSampler = sampler_partial(score_model=self.score_model)
 
         # Instantiate metrics
         metrics_partial = instantiate(cfg.metrics)
@@ -113,6 +123,16 @@ class SamplingRunner:
             stream=open(self.save_dir / "results.yaml", "w"),
         )
         torch.save(X, self.save_dir / "samples.pt")
+        
+        # Save cache samples separately if cache was used
+        if self.score_model.cache is not None:
+            cache_stats = self.score_model.cache.get_cache_stats()
+            if cache_stats:
+                logging.info(f"Cache statistics: {dict_to_str(cache_stats)}")
+                cache_output_dir = self.save_dir / "samples_cache"
+                cache_output_dir.mkdir(exist_ok=True)
+                torch.save(X, cache_output_dir / "samples.pt")
+                logging.info(f"Cache samples saved to {cache_output_dir / 'samples.pt'}")
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="sample")
