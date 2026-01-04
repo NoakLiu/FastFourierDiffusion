@@ -356,4 +356,4 @@ If you use the E2-CRF caching implementation, please cite:
 }
 ```
 
-Our code implementation based on paper https://arxiv.org/abs/2402.05933 and its repo.
+Our code implementation based on paper https://arxiv.org/abs/2402.05933 and its repo at https://github.com/vanderschaarlab/FourierDiffusion.
