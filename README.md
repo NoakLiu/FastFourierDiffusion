@@ -320,7 +320,7 @@ This compares:
 
 ### 2.5 E2-CRF Expected Performance
 
-- **Speedup**: 2× on real-world datasets
+- **Speedup**: ~2× on real-world datasets
 - **Quality**: Maintained (measured by sliced Wasserstein distance)
 - **Memory**: O(1) overhead per diffusion step
 
