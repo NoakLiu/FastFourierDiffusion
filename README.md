@@ -349,10 +349,10 @@ pre-commit
 If you use the E2-CRF caching implementation, please cite:
 
 ```
-@project{e2crf2025,
+@project{e2crf2026,
   title={Accelerating Frequency Domain Diffusion with Error-Feedback Caching},
   author={Dong Liu},
-  year={2025}
+  year={2026}
 }
 ```
 
