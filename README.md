@@ -175,7 +175,7 @@ python cmd/train.py datamodule=nasdaq fourier_transform=true
 # Standard sampling
 python cmd/sample.py model_id=<model_id> num_samples=200 num_diffusion_steps=1000
 
-# With cache (frequency domain models only, 2-4× faster)
+# With cache (frequency domain models only, 2× faster)
 python cmd/sample.py model_id=<model_id> +sampler.use_cache=true +sampler.cache_kwargs='{}' num_samples=200 num_diffusion_steps=1000
 ```
 
@@ -193,7 +193,7 @@ One can then reproduce the plots in the paper by including the  `run_id` to the 
 
 ### 2.3 E2-CRF Caching Acceleration
 
-This repository includes E2-CRF (Error-Feedback Event-Driven Cumulative Residual Feature) caching for accelerating frequency domain diffusion models. E2-CRF achieves 2-4× speedup while maintaining sample quality through:
+This repository includes E2-CRF (Error-Feedback Event-Driven Cumulative Residual Feature) caching for accelerating frequency domain diffusion models. E2-CRF achieves 2× speedup while maintaining sample quality through:
 
 1. **KV Caching**: Caching transformer key-value pairs across diffusion steps
 2. **Event-Driven Triggers**: Adaptively recomputing tokens based on CRF residual intensity
@@ -320,7 +320,7 @@ This compares:
 
 ### 2.5 E2-CRF Expected Performance
 
-- **Speedup**: 2-4× on real-world datasets
+- **Speedup**: 2× on real-world datasets
 - **Quality**: Maintained (measured by sliced Wasserstein distance)
 - **Memory**: O(1) overhead per diffusion step
 
